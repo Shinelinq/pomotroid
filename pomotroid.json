@@ -1,10 +1,10 @@
 {
-  "version": "1.7.1",
+  "version": "1.8.0",
   "description": "🍅 Simple and visually-pleasing Pomodoro timer. Pomotroid is a simple and configurable Pomodoro timer. It aims to provide a visually-pleasing and reliable way to track productivity using the Pomodoro Technique.",
-  "homepage": "https://github.com/Splode/pomotroid",
+  "homepage": "https://github.com/Shinelinq/pomotroid",
   "license": "MIT",
-  "url": "https://github.com/Splode/pomotroid/releases/download/v1.7.1/Pomotroid_1.7.1_x64-setup.exe#/dl.exe",
-  "hash": "a64e2a8c5d292720355033e26525fa751f226a1c5660b946857fbf114ef25fa1",
+  "url": "https://github.com/Shinelinq/pomotroid/releases/download/v1.8.0/Pomotroid_1.8.0_x64-setup.exe#/dl.exe",
+  "hash": "df90f3a22f5d65d8eb4e5cf006cd31a95649a0995343f58f8db9e9ad2055bd79",
   "installer": {
     "script": "Start-Process \"$dir\\dl.exe\" -ArgumentList '/S', \"/D=$dir\" -Wait"
   },
@@ -16,6 +16,6 @@
     ]
   ],
   "autoupdate": {
-    "url": "https://github.com/Splode/pomotroid/releases/download/v$version/Pomotroid_$version_x64-setup.exe#/dl.exe"
+    "url": "https://github.com/Shinelinq/pomotroid/releases/download/v$version/Pomotroid_$version_x64-setup.exe#/dl.exe"
   }
 }

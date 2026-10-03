@@ -7,6 +7,7 @@ thumbs.db
 !.gitkeep
 *.pem
 *.key
+*.password
 *.cert
 .svelte-kit/
 build/

@@ -66,7 +66,7 @@ See [THEMES.md](./THEMES.md) for the full theme list and instructions on creatin
 
 ### Download
 
-Releases for this fork belong on the [Shinelinq releases page](https://github.com/Shinelinq/pomotroid/releases). Version 1.8.0 is currently a source-only update; no installer is published by this commit. The inherited automatic updater still uses the upstream feed and signing key.
+Releases for this fork belong on the [Shinelinq releases page](https://github.com/Shinelinq/pomotroid/releases). Windows installers can also be built locally. Automatic updates use this fork's `latest.json` and a dedicated maintainer signing key; a newer signed installer must be published before advertising an update.
 
 The project supports packaging for **Windows**, **macOS**, and **Linux**. This fork has been developed and checked on Windows; other platforms have not been validated for these additions.
 
@@ -128,6 +128,26 @@ npm run tauri dev
 # Build a production release
 npm run tauri build
 ```
+
+### Windows maintainer builds (PowerShell)
+
+With the development environment already configured, run commands from the repository root:
+
+```powershell
+# Start the debug application with hot reload
+npm run tauri -- dev
+
+# Build the NSIS installer and its updater signature
+$env:TAURI_SIGNING_PRIVATE_KEY = "$env:USERPROFILE\.tauri\pomotroid\updater.key"
+$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = Get-Content "$env:USERPROFILE\.tauri\pomotroid\updater.password" -Raw
+npm run tauri -- build --bundles nsis
+Remove-Item Env:TAURI_SIGNING_PRIVATE_KEY, Env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+```
+
+The installer and `.sig` are written to `src-tauri/target/release/bundle/nsis/`.
+The encrypted signing key and password are local maintainer files outside this repository. Keep them safe; do not commit them or regenerate the key for each release. These updater signatures are distinct from Windows Authenticode certificates.
+
+A local build does not publish a GitHub Release. To distribute an automatic update, publish the newer installer, then update `latest.json` with its version, signature and public download URL. The current local v1.8.0 package is not advertised as a newer update to v1.8.0 clients. For CI builds, configure the repository's `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` secrets with this same key pair; the existing Linux release jobs also require their GPG signing secrets.
 
 ### Localization
 
