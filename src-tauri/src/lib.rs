@@ -1,7 +1,9 @@
 pub mod audio;
 pub mod commands;
+pub mod auxiliary_windows;
 pub mod db;
 pub mod notifications;
+pub mod mini;
 pub mod settings;
 pub mod shortcuts;
 pub mod themes;
@@ -31,6 +33,9 @@ use commands::{
     themes_list,
     timer_get_state, timer_reset, timer_restart_round, timer_skip, timer_toggle,
     window_set_visibility,
+    mini_open, mini_info, mini_ready, mini_failed, mini_restore, mini_hide_to_tray,
+    mini_set_top, mini_save_position, mini_exit,
+    aux_window_open, aux_window_ready,
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -89,6 +94,8 @@ pub fn run() {
                 settings::seed_defaults(&conn).expect("failed to seed default settings");
             }
             app.manage(db.clone());
+            app.manage(auxiliary_windows::AuxiliaryWindows::default());
+            app.manage(mini::MiniState::default());
 
             // --- Tray state (always created; icon populated only when min_to_tray is on) ---
             let tray_state = tray::TrayState::new();
@@ -334,8 +341,9 @@ pub fn run() {
                             api.prevent_close();
                             let _ = win_for_close.hide();
                         } else {
+                            mini::begin_exit(&app_for_close);
                             // Main window is truly closing — close child windows if open.
-                            for label in ["settings", "stats"] {
+                            for label in ["settings", "stats", "mini"] {
                                 if let Some(win) = app_for_close.get_webview_window(label) {
                                     let _ = win.close();
                                 }
@@ -386,6 +394,9 @@ pub fn run() {
             stats_get_heatmap,
             // Window
             window_set_visibility,
+            mini_open, mini_info, mini_ready, mini_failed, mini_restore, mini_hide_to_tray,
+            mini_set_top, mini_save_position, mini_exit,
+            aux_window_open, aux_window_ready,
             // Shortcuts
             shortcuts_reload,
             // Audio
@@ -404,6 +415,12 @@ pub fn run() {
             check_update,
             install_update,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if matches!(event, tauri::RunEvent::ExitRequested { .. }) {
+                mini::begin_exit(app);
+                auxiliary_windows::save_all(app);
+            }
+        });
 }

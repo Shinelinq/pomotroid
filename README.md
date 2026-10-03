@@ -20,6 +20,8 @@
 
 ## Overview
 
+This is the [Shinelinq fork](https://github.com/Shinelinq/pomotroid) of [Splode/Pomotroid](https://github.com/Splode/pomotroid). Version **1.8.0** adds enhanced statistics, an independent mini timer, and resizable auxiliary windows with geometry persistence. See [CHANGELOG.md](./CHANGELOG.md) for details. Original authorship and the MIT license are preserved.
+
 Pomotroid is a simple and configurable Pomodoro timer. It aims to provide a visually-pleasing and reliable way to track productivity using the Pomodoro Technique.
 
 Built with [Tauri 2](https://tauri.app), [Rust](https://www.rust-lang.org), and [Svelte 5](https://svelte.dev).
@@ -27,7 +29,9 @@ Built with [Tauri 2](https://tauri.app), [Rust](https://www.rust-lang.org), and 
 ## Features
 
 - **Configurable timer** — customise work duration, break durations, and the number of rounds per long break
-- **Statistics** — daily, weekly, and all-time session history with charts and a 52-week heatmap
+- **Statistics** — minute-accurate accumulated focus time, hourly details, a resizable weekly chart, and a year-selectable calendar heatmap with time/count modes and keyboard interaction
+- **Mini timer** — an independent 112×112 floating timer sharing the existing Rust engine, with remaining-time ring, pause/resume, skip, drag, context menu, and always-on-top controls
+- **Auxiliary windows** — resizable settings/statistics windows with independent position and size persistence
 - **38 bundled themes** — including Dracula, Nord, Tokyo Night, Catppuccin, Gruvbox, Rose Piné, and more; auto-switches with your OS light/dark preference
 - **Custom themes** — drop a JSON file into the themes folder; applied instantly without a restart
 - **Localization** — 8 languages: English, Spanish, French, German, Japanese, Chinese (Simplified), Turkish, and Portuguese; auto-detects OS language
@@ -44,7 +48,7 @@ Built with [Tauri 2](https://tauri.app), [Rust](https://www.rust-lang.org), and 
 
 ## Statistics
 
-Pomotroid tracks every completed session and surfaces the data across three views: a daily summary with an hourly breakdown, a weekly bar chart with streak tracking, and an all-time 52-week heatmap.
+Pomotroid tracks completed work sessions across three views: a daily summary with hourly counts and recorded focus durations, a weekly bar chart with streak tracking, and a yearly calendar heatmap with lifetime totals. Weekly and yearly charts switch between focus time and counts; all charts support preview, pinned details, and keyboard navigation.
 
 <div align="center">
   <img alt="Pomotroid statistics window" src=".github/images/pomotroid-stats.png" width="800px">
@@ -62,9 +66,9 @@ See [THEMES.md](./THEMES.md) for the full theme list and instructions on creatin
 
 ### Download
 
-Download the latest release from the [releases](https://github.com/Splode/pomotroid/releases) page.
+Releases for this fork belong on the [Shinelinq releases page](https://github.com/Shinelinq/pomotroid/releases). Version 1.8.0 is currently a source-only update; no installer is published by this commit. The inherited automatic updater still uses the upstream feed and signing key.
 
-Available for **Windows** (installer + standalone exe), **macOS** (universal DMG), and **Linux** (`.deb` + AppImage).
+The project supports packaging for **Windows**, **macOS**, and **Linux**. This fork has been developed and checked on Windows; other platforms have not been validated for these additions.
 
 > **Note:** Pomotroid is currently unsigned. Depending on your OS security settings you may see a warning on first launch — this is expected and can be safely dismissed.
 
@@ -78,7 +82,7 @@ Available for **Windows** (installer + standalone exe), **macOS** (universal DMG
 brew install --cask pomotroid
 ```
 
-> The Homebrew cask is maintained separately and may lag behind the latest release. Check the [releases](https://github.com/Splode/pomotroid/releases) page for the most current version.
+> The Homebrew cask installs upstream Pomotroid, not this fork.
 
 ## Custom Themes
 

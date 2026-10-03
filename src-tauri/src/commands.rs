@@ -358,22 +358,29 @@ pub fn stats_get_detailed(db: State<'_, DbState>) -> Result<DetailedStats, Strin
 #[tauri::command]
 pub fn stats_get_heatmap(db: State<'_, DbState>) -> Result<HeatmapStats, String> {
     let conn = db.lock().map_err(|e| e.to_string())?;
-    let entries = queries::get_heatmap_data(&conn).map_err(|e| {
+    query_heatmap_stats(&conn)
+}
+
+fn query_heatmap_stats(conn: &rusqlite::Connection) -> Result<HeatmapStats, String> {
+    let entries = queries::get_heatmap_data(conn).map_err(|e| {
         log::error!("[stats] failed to query heatmap data: {e}");
         e.to_string()
     })?;
-    let raw = queries::get_all_time_stats(&conn).map_err(|e| {
+    let raw = queries::get_all_time_stats(conn).map_err(|e| {
         log::error!("[stats] failed to query all-time stats: {e}");
         e.to_string()
     })?;
-    let streak = queries::get_streak(&conn).map_err(|e| {
+    let streak = queries::get_streak(conn).map_err(|e| {
         log::error!("[stats] failed to query streak for heatmap: {e}");
         e.to_string()
     })?;
     Ok(HeatmapStats {
         entries,
-        total_rounds: raw.completed_work_sessions as u32,
-        total_hours: (raw.total_work_secs / 3600) as u32,
+        total_rounds: u32::try_from(raw.completed_work_sessions)
+            .map_err(|e| format!("total rounds out of range: {e}"))?,
+        total_hours: u32::try_from(raw.total_work_secs / 3600)
+            .map_err(|e| format!("total hours out of range: {e}"))?,
+        total_focus_secs: raw.total_work_secs,
         longest_streak: streak.longest,
     })
 }
@@ -384,18 +391,130 @@ pub fn stats_get_heatmap(db: State<'_, DbState>) -> Result<HeatmapStats, String>
 
 /// Show or hide the main window.
 #[tauri::command]
-pub fn window_set_visibility(visible: bool, app: AppHandle) -> Result<(), String> {
+pub async fn window_set_visibility(visible: bool, app: AppHandle) -> Result<(), String> {
     log::debug!("[window] set visibility={visible}");
     let window = app
         .get_webview_window("main")
         .ok_or_else(|| "main window not found".to_string())?;
     if visible {
-        window.show().map_err(|e| e.to_string())?;
-        window.set_focus().map_err(|e| e.to_string())?;
+        crate::mini::restore(app).await?;
     } else {
         window.hide().map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+// Settings/statistics windows use their own geometry and lifecycle.
+#[tauri::command]
+pub async fn aux_window_open(
+    app: AppHandle,
+    kind: crate::auxiliary_windows::Kind,
+) -> Result<(), String> {
+    crate::auxiliary_windows::open(app, kind).await
+}
+
+#[tauri::command]
+pub async fn aux_window_ready(
+    app: AppHandle,
+    window: tauri::WebviewWindow,
+    token: u64,
+) -> Result<(), String> {
+    crate::auxiliary_windows::ready(app, window, token).await
+}
+
+// Mini window commands. Tokens identify a particular window lifetime.
+fn require_mini(window: &tauri::WebviewWindow) -> Result<(), String> {
+    if window.label() == "mini" {
+        Ok(())
+    } else {
+        Err("mini window required".into())
+    }
+}
+
+#[tauri::command]
+pub async fn mini_open(app: AppHandle, window: tauri::WebviewWindow) -> Result<(), String> {
+    if window.label() != "main" {
+        return Err("main window required".into());
+    }
+    crate::mini::open(app).await
+}
+
+#[tauri::command]
+pub fn mini_info(
+    app: AppHandle,
+    window: tauri::WebviewWindow,
+    token: u64,
+) -> Result<crate::mini::MiniInfo, String> {
+    require_mini(&window)?;
+    crate::mini::info(&app, token)
+}
+
+#[tauri::command]
+pub async fn mini_ready(
+    app: AppHandle,
+    window: tauri::WebviewWindow,
+    token: u64,
+) -> Result<(), String> {
+    require_mini(&window)?;
+    crate::mini::ready(app, token).await
+}
+
+#[tauri::command]
+pub async fn mini_failed(
+    app: AppHandle,
+    window: tauri::WebviewWindow,
+    token: u64,
+    message: String,
+) -> Result<(), String> {
+    require_mini(&window)?;
+    crate::mini::failed(app, token, message).await
+}
+
+#[tauri::command]
+pub async fn mini_restore(
+    app: AppHandle,
+    window: tauri::WebviewWindow,
+    token: u64,
+) -> Result<(), String> {
+    require_mini(&window)?;
+    crate::mini::restore_from_mini(app, token).await
+}
+
+#[tauri::command]
+pub async fn mini_hide_to_tray(
+    app: AppHandle,
+    window: tauri::WebviewWindow,
+    token: u64,
+) -> Result<(), String> {
+    require_mini(&window)?;
+    crate::mini::hide_to_tray(app, token).await
+}
+
+#[tauri::command]
+pub async fn mini_set_top(
+    app: AppHandle,
+    window: tauri::WebviewWindow,
+    token: u64,
+    value: bool,
+) -> Result<(), String> {
+    require_mini(&window)?;
+    crate::mini::set_top(app, token, value).await
+}
+
+#[tauri::command]
+pub async fn mini_save_position(
+    app: AppHandle,
+    window: tauri::WebviewWindow,
+    token: u64,
+) -> Result<(), String> {
+    require_mini(&window)?;
+    crate::mini::persist_position(app, token).await
+}
+
+#[tauri::command]
+pub fn mini_exit(app: AppHandle, window: tauri::WebviewWindow, token: u64) -> Result<(), String> {
+    require_mini(&window)?;
+    crate::mini::exit_from_mini(&app, token)
 }
 
 // ---------------------------------------------------------------------------
@@ -744,6 +863,8 @@ pub struct HeatmapStats {
     pub entries: Vec<queries::HeatmapEntry>,
     pub total_rounds: u32,
     pub total_hours: u32,
+    /// Exact sum of duration_secs for all completed work sessions.
+    pub total_focus_secs: u64,
     pub longest_streak: u32,
 }
 
@@ -751,11 +872,94 @@ pub struct HeatmapStats {
 mod tests {
     use rusqlite::Connection;
     use crate::db::migrations;
+    use super::query_heatmap_stats;
 
     fn setup() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         migrations::run(&conn).unwrap();
         conn
+    }
+
+    #[test]
+    fn heatmap_payload_empty_preserves_existing_fields() {
+        let stats = query_heatmap_stats(&setup()).unwrap();
+        assert_eq!(
+            serde_json::to_value(stats).unwrap(),
+            serde_json::json!({
+                "entries": [],
+                "total_rounds": 0,
+                "total_hours": 0,
+                "total_focus_secs": 0,
+                "longest_streak": 0,
+            })
+        );
+    }
+
+    #[test]
+    fn heatmap_payload_mixed_sessions_uses_raw_seconds() {
+        let conn = setup();
+        conn.execute_batch(
+            "INSERT INTO sessions (started_at, round_type, duration_secs, completed)
+             VALUES (1000, 'work', 1500, 1), (1000, 'work', 2700, 1),
+                    (1000, 'work', 1200, 0), (1000, 'short-break', 300, 1)",
+        )
+        .unwrap();
+        let stats = query_heatmap_stats(&conn).unwrap();
+        assert_eq!(stats.total_rounds, 2);
+        assert_eq!(stats.total_hours, 1);
+        assert_eq!(stats.total_focus_secs, 4200);
+        assert_eq!(stats.entries.len(), 1);
+        assert_eq!(stats.entries[0].count, 2);
+        assert_eq!(stats.entries[0].focus_secs, 4200);
+        assert_eq!(stats.longest_streak, 1);
+    }
+
+    #[test]
+    fn heatmap_payload_preserves_seconds_and_legacy_integer_hours() {
+        for seconds in [
+            2700_u64,
+            3600,
+            4200,
+            6300,
+            1123500,
+            3637,
+            u64::from(u32::MAX) + 123,
+        ] {
+            let conn = setup();
+            conn.execute(
+                "INSERT INTO sessions (started_at, round_type, duration_secs, completed)
+                 VALUES (1000, 'work', ?1, 1)",
+                [i64::try_from(seconds).unwrap()],
+            )
+            .unwrap();
+            let value = serde_json::to_value(query_heatmap_stats(&conn).unwrap()).unwrap();
+            assert_eq!(value["total_focus_secs"].as_u64(), Some(seconds));
+            assert_eq!(value["entries"][0]["focus_secs"].as_u64(), Some(seconds));
+            assert_eq!(value["total_hours"].as_u64(), Some(seconds / 3600));
+            assert_eq!(value["total_rounds"], 1);
+        }
+    }
+
+    #[test]
+    fn heatmap_payload_propagates_query_errors() {
+        let conn = Connection::open_in_memory().unwrap();
+        assert!(query_heatmap_stats(&conn).is_err());
+    }
+
+    #[test]
+    fn heatmap_payload_rejects_legacy_hour_overflow_instead_of_truncating() {
+        let conn = setup();
+        let seconds = (i64::from(u32::MAX) + 1) * 3600;
+        conn.execute(
+            "INSERT INTO sessions (started_at, round_type, duration_secs, completed)
+             VALUES (1000, 'work', ?1, 1)",
+            [seconds],
+        )
+        .unwrap();
+        assert!(query_heatmap_stats(&conn)
+            .err()
+            .unwrap()
+            .contains("total hours out of range"));
     }
 
     fn seed_sessions(conn: &Connection) {

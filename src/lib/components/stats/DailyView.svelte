@@ -1,239 +1,298 @@
 <script lang="ts">
   import type { DailyStats } from '$lib/types';
   import * as m from '$paraglide/messages.js';
+  import { getLocale } from '$paraglide/runtime.js';
+  import StatsSummary from './StatsSummary.svelte';
+  import StatsHelp from './StatsHelp.svelte';
+  import StatsTooltip from './StatsTooltip.svelte';
+  import DateDetails from './DateDetails.svelte';
+  import { createChartInteraction } from './interaction.svelte';
+  import { measurePlot } from './measurePlot';
+  import { chartScale, formatDuration, localDate, hourRange } from './stats';
 
-  let { today }: { today: DailyStats | null } = $props();
-
-  const CHART_H = 80; // px, max bar height in the hourly chart
-  const CHART_W = 744; // px, total SVG width for 24 bars
-  const BAR_W = 22; // px per bar
-  const BAR_GAP = 9; // px between bars
-
-  function fmtTime(mins: number): string {
-    if (mins < 60) return `${mins}m`;
-    const h = Math.floor(mins / 60);
-    const m = mins % 60;
-    return m === 0 ? `${h}h` : `${h}h ${m}m`;
+  let { today, date }: { today: DailyStats; date: string } = $props();
+  const interaction = createChartInteraction();
+  const tooltipId = 'daily-hour-tooltip';
+  let chart = $state<SVGSVGElement>();
+  let plot = $state({ width: 0, height: 190 });
+  let focusedHour = $state(new Date().getHours());
+  const number = $derived(new Intl.NumberFormat(getLocale()));
+  const fullDate = $derived(new Intl.DateTimeFormat(getLocale(), { dateStyle: 'full' }));
+  const shortDate = $derived(
+    new Intl.DateTimeFormat(getLocale(), { year: 'numeric', month: 'short', day: 'numeric' })
+  );
+  const hours = $derived(
+    today.by_hour.map((rounds, hour) => ({ hour, rounds, seconds: today.by_hour_focus_secs[hour] }))
+  );
+  const scale = $derived(chartScale(Math.max(0, ...today.by_hour), 'rounds', plot.height - 42));
+  const width = $derived(Math.max(1, plot.width));
+  const height = $derived(Math.max(1, plot.height));
+  const left = $derived(Math.max(36, ...scale.ticks.map((n) => number.format(n).length * 6.5 + 8)));
+  const interval = $derived(Math.max(1, (width - left - 8) / 24));
+  const barWidth = $derived(Math.min(24, interval * 0.55));
+  const baseline = $derived(height - 30);
+  const plotHeight = $derived(Math.max(1, baseline - 12));
+  const labelStep = $derived(width >= 900 ? 3 : 6);
+  const axisHours = $derived(Array.from({ length: 24 / labelStep + 1 }, (_, i) => i * labelStep));
+  const pinned = $derived(interaction.pinned === null ? null : hours[Number(interaction.pinned)]);
+  const preview = $derived(
+    interaction.preview === null ? null : hours[Number(interaction.preview.date)]
+  );
+  const range = (hour: number) => m.stats_hour_range(hourRange(hour));
+  const values = (hour: { rounds: number; seconds: number }) => [
+    `${m.stats_rounds()}: ${number.format(hour.rounds)}`,
+    m.stats_hour_focus({ duration: formatDuration(hour.seconds) }),
+  ];
+  const description = (hour: (typeof hours)[number]) => [
+    fullDate.format(localDate(date)),
+    range(hour.hour),
+    ...values(hour),
+    m.stats_start_hour_help(),
+  ];
+  $effect(() => {
+    date;
+    interaction.clear();
+    focusedHour = new Date().getHours();
+  });
+  function show(event: PointerEvent | FocusEvent, hour: number, immediate = false) {
+    interaction.show(String(hour), event.currentTarget as Element, immediate);
   }
-
-  function fmtRate(rate: number | null): string {
-    if (rate === null) return '—';
-    return `${Math.round(rate * 100)}%`;
+  function navigate(event: KeyboardEvent, hour: number) {
+    let next = hour;
+    if (event.key === 'ArrowLeft') next = Math.max(0, hour - 1);
+    else if (event.key === 'ArrowRight') next = Math.min(23, hour + 1);
+    else if (event.key === 'Home') next = 0;
+    else if (event.key === 'End') next = 23;
+    else if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      interaction.toggle(String(hour));
+      return;
+    } else return;
+    event.preventDefault();
+    focusedHour = next;
+    chart?.querySelector<SVGGElement>(`[data-hour="${next}"]`)?.focus();
   }
-
-  const byHour = $derived(today?.by_hour ?? Array(24).fill(0));
-  const maxHour = $derived(Math.max(1, ...byHour));
-  const hasData = $derived(today !== null && today.rounds > 0);
-
-  // Hour labels: show every 6 hours
-  const hourLabels = [0, 6, 12, 18];
 </script>
 
+<svelte:window
+  onkeydown={interaction.escape}
+  onclick={(event) => {
+    const target = event.target as Element;
+    if (chart?.contains(target) && !target.closest('[data-hour]')) interaction.clear();
+  }}
+/>
 <div class="view">
-  <!-- Stat cards -->
-  <div class="cards">
-    <div class="card" style="--delay: 0ms">
-      <span class="card-label">{m.stats_rounds()}</span>
-      <span class="card-value">{today?.rounds ?? '—'}</span>
-    </div>
-    <div class="card-divider"></div>
-    <div class="card" style="--delay: 60ms">
-      <span class="card-label">{m.stats_focus_time()}</span>
-      <span class="card-value">{today ? fmtTime(today.focus_mins) : '—'}</span>
-    </div>
-    <div class="card-divider"></div>
-    <div class="card" style="--delay: 120ms">
-      <span class="card-label">{m.stats_completion()}</span>
-      <span class="card-value">{today ? fmtRate(today.completion_rate) : '—'}</span>
-    </div>
+  <div class="summary-row">
+    <StatsSummary
+      items={[
+        { label: m.stats_rounds(), value: number.format(today.rounds) },
+        // Preserve the existing summary's minute rounding; hourly detail uses exact backend seconds.
+        { label: m.stats_focus_time(), value: formatDuration(today.focus_mins * 60) },
+        {
+          label: m.stats_completion(),
+          value:
+            today.completion_rate === null ? '—' : `${Math.round(today.completion_rate * 100)}%`,
+        },
+      ]}
+    />
   </div>
-
-  <!-- Hourly breakdown -->
-  <div class="section">
-    <div class="section-header">
-      <span class="section-title">{m.stats_sessions_by_hour()}</span>
-      {#if !hasData}
-        <span class="empty-hint">{m.stats_no_sessions_today()}</span>
-      {/if}
+  <div class="chart-section">
+    <div class="toolbar">
+      <div class="chart-title">
+        <h2>{m.stats_hourly_rounds()}</h2>
+        <StatsHelp label={m.stats_hourly_rounds()} text={m.stats_start_hour_help()} />
+      </div>
+      <span>{shortDate.format(localDate(date))}</span>
     </div>
-
-    <div class="chart-wrap">
+    <div class="plot" use:measurePlot={(size) => (plot = size)}>
       <svg
-        width={CHART_W}
-        height={CHART_H + 28}
-        viewBox="0 0 {CHART_W} {CHART_H + 28}"
-        class="chart"
+        bind:this={chart}
+        {width}
+        {height}
+        viewBox="0 0 {width} {height}"
+        role="group"
+        aria-label={m.stats_hour_chart_help()}
       >
-        {#each byHour as count, h}
-          {@const barH = Math.max(2, Math.round((count / maxHour) * CHART_H))}
-          {@const x = h * (BAR_W + BAR_GAP)}
-          {@const y = CHART_H - barH}
-
-          <!-- Bar -->
-          <rect
-            {x}
-            {y}
-            width={BAR_W}
-            height={barH}
-            rx="2"
-            class="bar"
-            class:bar-empty={count === 0}
-            style="--bar-scale: {barH / CHART_H}; --bar-delay: {h * 18}ms"
-          />
-
-          <!-- Hour label (every 6 hours) -->
-          {#if hourLabels.includes(h)}
-            <text x={x + BAR_W / 2} y={CHART_H + 18} text-anchor="middle" class="hour-label"
-              >{h === 0 ? '12a' : h === 12 ? '12p' : h < 12 ? `${h}a` : `${h - 12}p`}</text
-            >
-          {/if}
+        {#each [0, ...scale.ticks] as value}
+          {@const y = baseline - (value / scale.maximum) * plotHeight}
+          <line x1={left} x2={width - 8} y1={y} y2={y} class="gridline" />
+          <text x={left - 8} {y} dy="3" text-anchor="end" class="axis-label"
+            >{number.format(value)}</text
+          >
         {/each}
-
-        <!-- Baseline -->
-        <line x1="0" y1={CHART_H} x2={CHART_W} y2={CHART_H} class="baseline" />
+        {#each hours as hour}
+          {@const x = left + (hour.hour + 0.5) * interval}
+          {@const barHeight = (hour.rounds / scale.maximum) * plotHeight}
+          <g
+            role="button"
+            tabindex={hour.hour === focusedHour ? 0 : -1}
+            data-hour={hour.hour}
+            aria-label={description(hour).join(', ')}
+            aria-pressed={interaction.pinned === String(hour.hour)}
+            aria-describedby={preview?.hour === hour.hour ? tooltipId : undefined}
+            onclick={() => {
+              focusedHour = hour.hour;
+              interaction.toggle(String(hour.hour));
+            }}
+            onpointerenter={(event) => show(event, hour.hour)}
+            onpointerleave={interaction.leave}
+            onfocus={(event) => {
+              focusedHour = hour.hour;
+              show(event, hour.hour, true);
+            }}
+            onblur={interaction.leave}
+            onkeydown={(event) => navigate(event, hour.hour)}
+          >
+            <rect
+              class="hit"
+              data-tooltip-hit
+              x={left + hour.hour * interval + 1}
+              y="3"
+              width={Math.max(1, interval - 2)}
+              height={Math.max(0, height - 6)}
+              rx="2"
+            />
+            {#if barHeight > 0}<rect
+                class="bar"
+                data-tooltip-anchor
+                x={x - barWidth / 2}
+                y={baseline - barHeight}
+                width={barWidth}
+                height={barHeight}
+                rx="2"
+              />{/if}
+            {#if interaction.pinned === String(hour.hour)}<line
+                x1={x - 5}
+                x2={x + 5}
+                y1={height - 3}
+                y2={height - 3}
+                class="selected-line"
+              />{/if}
+          </g>
+        {/each}
+        {#each axisHours as hour}<text
+            x={left + hour * interval}
+            y={baseline + 20}
+            text-anchor={hour === 0 ? 'start' : hour === 24 ? 'end' : 'middle'}
+            class="axis-label">{hourRange(hour).start}</text
+          >{/each}
+        {#if today.rounds === 0}<text
+            x={left + (width - left) / 2}
+            y={12 + plotHeight * 0.4}
+            text-anchor="middle"
+            class="empty">{m.stats_no_sessions_today()}</text
+          >{/if}
       </svg>
     </div>
+    <DateDetails
+      date={pinned ? `${fullDate.format(localDate(date))} · ${range(pinned.hour)}` : null}
+      lines={pinned ? values(pinned) : []}
+      hint={m.stats_hour_detail_hint()}
+      clearLabel={m.stats_clear_hour()}
+      onclear={interaction.unpin}
+    />
   </div>
+  {#if interaction.preview && preview}<StatsTooltip
+      id={tooltipId}
+      anchor={interaction.preview.anchor}
+      lines={description(preview)}
+      onenter={interaction.keep}
+      onleave={interaction.leave}
+    />{/if}
 </div>
 
 <style>
   .view {
+    flex: 1 0 auto;
+    min-height: 100%;
+    min-width: 0;
     display: flex;
     flex-direction: column;
-    gap: 0;
-    height: 100%;
-    padding: 0;
-    animation: app-fade-in 0.2s ease;
   }
-
-  /* ── Stat cards ──────────────────────────────────────────── */
-  .cards {
-    display: flex;
-    align-items: stretch;
+  .summary-row {
+    flex-shrink: 0;
     border-bottom: 1px solid var(--color-separator);
   }
-
-  .card {
+  .chart-section {
     flex: 1;
     display: flex;
     flex-direction: column;
+    padding: var(--stats-block-gap, 20px) var(--stats-pad, 24px) 0;
+  }
+  .toolbar {
+    display: flex;
+    justify-content: space-between;
     align-items: center;
-    justify-content: center;
-    gap: 6px;
-    padding: 28px 24px;
-    animation: card-rise 0.35s cubic-bezier(0.22, 1, 0.36, 1) both;
-    animation-delay: var(--delay, 0ms);
-  }
-
-  @keyframes card-rise {
-    from {
-      opacity: 0;
-      transform: translateY(8px);
-    }
-    to {
-      opacity: 1;
-      transform: translateY(0);
-    }
-  }
-
-  .card-label {
-    font-size: 0.68rem;
-    font-weight: 600;
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
+    flex-wrap: wrap;
+    gap: 8px 16px;
     color: var(--color-foreground-darker);
-  }
-
-  .card-value {
-    font-size: 2.4rem;
-    font-weight: 700;
-    font-variant-numeric: tabular-nums;
-    letter-spacing: -0.02em;
-    color: var(--color-foreground);
-    line-height: 1;
-  }
-
-  .card-divider {
-    width: 1px;
-    background: var(--color-separator);
-    align-self: stretch;
-    margin: 12px 0;
-  }
-
-  /* ── Section ─────────────────────────────────────────────── */
-  .section {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    padding: 20px 24px 16px;
-    gap: 12px;
-    overflow: hidden;
-  }
-
-  .section-header {
-    display: flex;
-    align-items: baseline;
-    gap: 12px;
-  }
-
-  .section-title {
-    font-size: 0.68rem;
-    font-weight: 600;
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
-    color: var(--color-foreground-darker);
-  }
-
-  .empty-hint {
     font-size: 0.72rem;
-    color: color-mix(in oklch, var(--color-foreground-darker) 60%, transparent);
-    font-style: italic;
   }
-
-  /* ── Hourly chart ────────────────────────────────────────── */
-  .chart-wrap {
-    overflow-x: auto;
-    overflow-y: hidden;
+  .chart-title {
+    display: flex;
+    align-items: center;
+    gap: 4px;
   }
-
-  .chart {
+  h2 {
+    font-size: 0.75rem;
+    font-weight: 600;
+  }
+  .plot {
+    position: relative;
+    flex: 1 0 190px;
+    min-height: 190px;
+    min-width: 0;
+    margin: var(--stats-chart-gap, 16px) 0 8px;
+  }
+  svg {
+    position: absolute;
+    inset: 0;
     display: block;
+    overflow: visible;
   }
-
+  .gridline {
+    stroke: var(--color-separator);
+    stroke-width: 1;
+  }
+  .axis-label {
+    fill: var(--color-foreground-darker);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    pointer-events: none;
+  }
+  g {
+    outline: none;
+    cursor: pointer;
+  }
+  .hit {
+    fill: transparent;
+    stroke: transparent;
+    stroke-width: 2;
+  }
   .bar {
     fill: var(--color-focus-round);
     opacity: 0.85;
-    transform-origin: bottom;
-    transform-box: fill-box;
-    animation: bar-rise 0.4s cubic-bezier(0.22, 1, 0.36, 1) both;
-    animation-delay: var(--bar-delay, 0ms);
+    pointer-events: none;
+    transition: opacity 120ms;
   }
-
-  @keyframes bar-rise {
-    from {
-      transform: scaleY(0.05);
-      opacity: 0;
-    }
-    to {
-      transform: scaleY(1);
-      opacity: 0.85;
-    }
+  g:hover .bar {
+    opacity: 1;
   }
-
-  .bar-empty {
-    fill: color-mix(in oklch, var(--color-foreground) 8%, transparent);
-    animation: none;
+  g:focus-visible .hit {
+    stroke: color-mix(in oklch, var(--color-foreground) 45%, transparent);
   }
-
-  .hour-label {
+  .selected-line {
+    stroke: var(--color-focus-round);
+    stroke-width: 2;
+  }
+  .empty {
     fill: var(--color-foreground-darker);
-    font-size: 9px;
-    font-variant-numeric: tabular-nums;
-    cursor: default;
+    font-size: 0.75rem;
+    pointer-events: none;
   }
-
-  .baseline {
-    stroke: var(--color-separator);
-    stroke-width: 1;
+  @media (prefers-reduced-motion: reduce) {
+    .bar {
+      transition: none;
+    }
   }
 </style>

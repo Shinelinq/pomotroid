@@ -2,560 +2,528 @@
   import type { HeatmapStats, HeatmapEntry } from '$lib/types';
   import * as m from '$paraglide/messages.js';
   import { getLocale } from '$paraglide/runtime.js';
+  import MetricSwitch from './MetricSwitch.svelte';
+  import StatsSummary from './StatsSummary.svelte';
+  import StatsTooltip from './StatsTooltip.svelte';
+  import DateDetails from './DateDetails.svelte';
+  import { createChartInteraction } from './interaction.svelte';
+  import { measureWidth } from './measureWidth';
+  import {
+    buildYear,
+    summarizeYear,
+    formatDuration,
+    localDate,
+    heatLevel,
+    moveDate,
+    type Metric,
+    type CalendarCell,
+  } from './stats';
 
-  let { heatmap }: { heatmap: HeatmapStats | null } = $props();
-
-  // Heatmap grid constants
-  const CELL = 11;
-  const GAP = 2;
-  const STRIDE = CELL + GAP;
-  const DAYS = 7;
-  const GRID_H = DAYS * STRIDE - GAP; // 89px
-
-  // Locale-aware month and day-of-week names — reactive to app language setting
-  const monthFmt = $derived(new Intl.DateTimeFormat(getLocale(), { month: 'short' }));
-  const dowFmt = $derived(new Intl.DateTimeFormat(getLocale(), { weekday: 'short' }));
-  const MONTH_NAMES: string[] = $derived(
-    Array.from({ length: 12 }, (_, i) => monthFmt.format(new Date(2000, i, 1)))
+  let {
+    heatmap,
+    today,
+    loading = false,
+    metric = $bindable<Metric>('time'),
+    selectedYear = $bindable(new Date().getFullYear()),
+  }: {
+    heatmap: HeatmapStats | null;
+    today: string;
+    loading?: boolean;
+    metric?: Metric;
+    selectedYear?: number;
+  } = $props();
+  const interaction = createChartInteraction();
+  const legendInteraction = createChartInteraction();
+  const tooltipId = 'yearly-date-tooltip';
+  let chart = $state<SVGSVGElement>();
+  let containerWidth = $state(0);
+  let focusedDate = $state<string | null>(null);
+  const currentYear = $derived(Number(today.slice(0, 4)));
+  const firstYear = $derived(
+    Math.min(currentYear, ...(heatmap?.entries ?? []).map((d) => Number(d.date.slice(0, 4))))
   );
-  // Row labels: Mon (row 1), Wed (row 3), Fri (row 5) — reference dates that land on those days
-  const ROW_LABELS: Record<number, string> = $derived({
-    1: dowFmt.format(new Date(2000, 0, 3)), // Monday
-    3: dowFmt.format(new Date(2000, 0, 5)), // Wednesday
-    5: dowFmt.format(new Date(2000, 0, 7)), // Friday
+  const calendar = $derived(
+    heatmap === null ? null : buildYear(heatmap.entries, selectedYear, today)
+  );
+  const annual = $derived(heatmap === null ? null : summarizeYear(heatmap.entries, selectedYear));
+  const activeDays = $derived(
+    heatmap === null ? null : heatmap.entries.filter((d) => d.count > 0).length
+  );
+  const validDates = $derived(
+    new Set((calendar?.cells ?? []).filter((d) => d.valid).map((d) => d.date))
+  );
+  const tabDate = $derived(
+    focusedDate && validDates.has(focusedDate)
+      ? focusedDate
+      : validDates.has(today)
+        ? today
+        : [...validDates][0]
+  );
+  const fullDate = $derived(new Intl.DateTimeFormat(getLocale(), { dateStyle: 'full' }));
+  const shortDate = $derived(
+    new Intl.DateTimeFormat(getLocale(), { month: 'short', day: 'numeric' })
+  );
+  const monthName = $derived(new Intl.DateTimeFormat(getLocale(), { month: 'short' }));
+  const weekday = $derived(new Intl.DateTimeFormat(getLocale(), { weekday: 'short' }));
+  const number = $derived(new Intl.NumberFormat(getLocale()));
+  const LEFT = 32;
+  const TOP = 20;
+  const cellSize = $derived(
+    Math.max(
+      6,
+      Math.min(
+        14,
+        (containerWidth - LEFT - 8 - ((calendar?.weeks ?? 53) - 1) * 2) / (calendar?.weeks ?? 53)
+      )
+    )
+  );
+  const stride = $derived(cellSize + 2);
+  const svgWidth = $derived(LEFT + (calendar?.weeks ?? 53) * stride - 2 + 8);
+  const svgHeight = $derived(TOP + 7 * stride + 2);
+  const fills = ['var(--heat-0)', 'var(--heat-1)', 'var(--heat-2)', 'var(--heat-3)'];
+  const pinned = $derived(
+    calendar?.cells.find((cell) => cell.date === interaction.pinned && cell.valid) ?? null
+  );
+  const preview = $derived(
+    calendar?.cells.find((cell) => cell.date === interaction.preview?.date && cell.valid) ?? null
+  );
+  const details = (day: HeatmapEntry) => [
+    `${m.stats_focus_time()}: ${formatDuration(day.focus_secs)}`,
+    `${m.stats_rounds()}: ${number.format(day.count)}`,
+  ];
+  const legend = $derived(
+    metric === 'time'
+      ? [
+          m.stats_heat_time_zero(),
+          m.stats_heat_time_low(),
+          m.stats_heat_time_mid(),
+          m.stats_heat_time_high(),
+        ]
+      : [
+          m.stats_heat_count_zero(),
+          m.stats_heat_count_low(),
+          m.stats_heat_count_mid(),
+          m.stats_heat_count_high(),
+        ]
+  );
+
+  $effect(() => {
+    selectedYear;
+    interaction.clear();
+    legendInteraction.clear();
+    focusedDate = null;
   });
-
-  // Year navigation state
-  const currentYear = new Date().getFullYear();
-  let selectedYear = $state(currentYear);
-
-  // Earliest year with recorded sessions (determines how far back the user can navigate)
-  const firstYear = $derived.by(() => {
-    if (!heatmap || heatmap.entries.length === 0) return currentYear;
-    return Number(heatmap.entries[0].date.slice(0, 4));
+  $effect(() => {
+    if (heatmap && (selectedYear < firstYear || selectedYear > currentYear))
+      selectedYear = currentYear;
   });
-
-  interface GridCell {
-    date: string;
-    count: number;
-    level: 0 | 1 | 2 | 3;
-    dimmed: boolean; // future or out-of-year
+  function show(event: PointerEvent | FocusEvent, cell: CalendarCell, immediate = false) {
+    legendInteraction.hidePreview();
+    interaction.show(cell.date, event.currentTarget as SVGRectElement, immediate);
   }
-
-  interface MonthLabel {
-    x: number;
-    label: string;
-  }
-
-  function buildGridForYear(
-    year: number,
-    entries: HeatmapEntry[]
-  ): { grid: GridCell[][]; months: MonthLabel[]; weekCount: number } {
-    const byDate = new Map(entries.map((e) => [e.date, e.count]));
-
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-
-    // Grid start: Sunday on or before Jan 1 of the selected year
-    const jan1 = new Date(year, 0, 1);
-    const gridStart = new Date(jan1);
-    gridStart.setDate(jan1.getDate() - jan1.getDay());
-
-    // Grid end: Saturday on or after Dec 31 of the selected year
-    const dec31 = new Date(year, 11, 31);
-    const gridEnd = new Date(dec31);
-    gridEnd.setDate(dec31.getDate() + (6 - dec31.getDay()));
-
-    const msPerWeek = 7 * 24 * 60 * 60 * 1000;
-    const weekCount = Math.round((gridEnd.getTime() - gridStart.getTime()) / msPerWeek) + 1;
-
-    const grid: GridCell[][] = [];
-    const months: MonthLabel[] = [];
-    let lastMonth = -1;
-
-    for (let w = 0; w < weekCount; w++) {
-      const col: GridCell[] = [];
-      for (let d = 0; d < DAYS; d++) {
-        const dt = new Date(gridStart);
-        dt.setDate(gridStart.getDate() + w * DAYS + d);
-        const dateStr = fmtDate(dt);
-        const count = byDate.get(dateStr) ?? 0;
-        const dimmed = dt > today || dt.getFullYear() !== year;
-        const level = dimmed || count === 0 ? 0 : count <= 3 ? 1 : count <= 7 ? 2 : 3;
-        col.push({ date: dateStr, count, level: level as 0 | 1 | 2 | 3, dimmed });
-      }
-
-      // Month label when the first cell of the week belongs to the selected year and starts a new month
-      const firstDate = new Date(col[0].date + 'T00:00:00');
-      const month = firstDate.getMonth();
-      if (firstDate.getFullYear() === year && month !== lastMonth) {
-        months.push({ x: w * STRIDE, label: MONTH_NAMES[month] });
-        lastMonth = month;
-      }
-
-      grid.push(col);
-    }
-
-    return { grid, months, weekCount };
-  }
-
-  function fmtDate(d: Date): string {
-    return [
-      d.getFullYear(),
-      String(d.getMonth() + 1).padStart(2, '0'),
-      String(d.getDate()).padStart(2, '0'),
-    ].join('-');
-  }
-
-  function fmtHours(h: number): string {
-    return h >= 1000 ? `${(h / 1000).toFixed(1)}k` : String(h);
-  }
-
-  const LEVEL_FILL = ['var(--heat-0)', 'var(--heat-1)', 'var(--heat-2)', 'var(--heat-3)'] as const;
-
-  // Tooltip — viewport-fixed so it escapes SVG/overflow clipping.
-  let tooltip = $state<{ x: number; y: number; text: string } | null>(null);
-  let tooltipEl = $state<HTMLDivElement | undefined>(undefined);
-
-  function showTooltip(event: MouseEvent, cell: GridCell) {
-    if (cell.dimmed) {
-      tooltip = null;
+  function navigate(event: KeyboardEvent, date: string) {
+    const offsets: Record<string, number> = {
+      ArrowLeft: -7,
+      ArrowRight: 7,
+      ArrowUp: -1,
+      ArrowDown: 1,
+    };
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      interaction.toggle(date);
       return;
     }
-    const cellRect = (event.currentTarget as SVGRectElement).getBoundingClientRect();
-    const text =
-      cell.count === 0
-        ? `${cell.date}: ${m.stats_no_sessions_today().toLowerCase()}`
-        : `${cell.date}: ${cell.count} ${cell.count === 1 ? m.stats_rounds().toLowerCase().replace(/s$/, '') : m.stats_rounds().toLowerCase()}`;
-    tooltip = { x: cellRect.left + CELL / 2, y: cellRect.top - 8, text };
+    let next: string;
+    if (event.key === 'Home') next = [...validDates][0];
+    else if (event.key === 'End') next = [...validDates].at(-1)!;
+    else if (event.key in offsets) next = moveDate(date, offsets[event.key], validDates);
+    else return;
+    event.preventDefault();
+    focusedDate = next;
+    chart?.querySelector<SVGRectElement>(`[data-day="${next}"]`)?.focus();
   }
-
-  const { grid, months, weekCount } = $derived.by(() => {
-    if (!heatmap) return { grid: [] as GridCell[][], months: [] as MonthLabel[], weekCount: 52 };
-    return buildGridForYear(selectedYear, heatmap.entries);
-  });
-
-  const GRID_W = $derived(weekCount * STRIDE - GAP);
-  const LEFT_OFFSET = 28;
-  const MONTH_LABEL_H = 16;
-  const SVG_W = $derived(LEFT_OFFSET + GRID_W);
-  const SVG_H = MONTH_LABEL_H + GRID_H;
-
-  const hasData = $derived(heatmap !== null && heatmap.total_rounds > 0);
 </script>
 
-<!-- Intensity scale CSS variables -->
-<svelte:head>
-  <style>
-    :root {
-      --heat-0: color-mix(in oklch, var(--color-foreground) 6%, var(--color-background));
-      --heat-1: color-mix(in oklch, var(--color-focus-round) 28%, var(--color-background));
-      --heat-2: color-mix(in oklch, var(--color-focus-round) 60%, var(--color-background));
-      --heat-3: var(--color-focus-round);
-    }
-  </style>
-</svelte:head>
-
+<svelte:window
+  onkeydown={(event) => {
+    interaction.escape(event);
+    legendInteraction.escape(event);
+  }}
+  onclick={(event) => {
+    const target = event.target as Element;
+    if (chart?.contains(target) && !target.closest('[data-day]')) interaction.clear();
+  }}
+/>
 <div class="view">
-  {#if heatmap === null}
-    <div class="loading"><span>{m.stats_loading()}</span></div>
-  {:else}
-    <!-- Heatmap section -->
-    <div class="heatmap-section">
-      <div class="heatmap-wrap">
-        <!-- Year navigation -->
-        <div class="year-nav">
+  <div class="year-section">
+    <div class="year-group">
+      <div class="toolbar">
+        <div class="year-nav" role="group" aria-label={m.stats_year_navigation()}>
           <button
-            class="year-btn"
-            onclick={() => {
-              selectedYear -= 1;
-              tooltip = null;
-            }}
-            disabled={selectedYear <= firstYear}
+            disabled={heatmap === null || selectedYear <= firstYear}
+            onclick={() => selectedYear--}
             aria-label={m.stats_prev_year()}
           >
-            <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-              <polyline
-                points="9,2 4,7 9,12"
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true"
+              ><path
+                d="m9 2-5 5 5 5"
                 stroke="currentColor"
                 stroke-width="1.5"
                 stroke-linecap="round"
                 stroke-linejoin="round"
-              />
-            </svg>
+              /></svg
+            >
           </button>
-          <span class="year-label">{selectedYear}</span>
+          <span class="year-label" aria-live="polite">{selectedYear}</span>
           <button
-            class="year-btn"
-            onclick={() => {
-              selectedYear += 1;
-              tooltip = null;
-            }}
-            disabled={selectedYear >= currentYear}
+            disabled={heatmap === null || selectedYear >= currentYear}
+            onclick={() => selectedYear++}
             aria-label={m.stats_next_year()}
           >
-            <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-              <polyline
-                points="5,2 10,7 5,12"
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true"
+              ><path
+                d="m5 2 5 5-5 5"
                 stroke="currentColor"
                 stroke-width="1.5"
                 stroke-linecap="round"
                 stroke-linejoin="round"
-              />
-            </svg>
+              /></svg
+            >
           </button>
         </div>
-
-        <!-- Heatmap SVG -->
-        <svg
-          width={SVG_W}
-          height={SVG_H}
-          viewBox="0 0 {SVG_W} {SVG_H}"
-          class="heatmap-svg"
-          onmouseleave={() => {
-            tooltip = null;
-          }}
-          role="img"
-          aria-label="Annual activity heatmap"
-        >
-          <!-- Month labels -->
-          {#each months as mo}
-            <text x={LEFT_OFFSET + mo.x} y={10} class="month-label">{mo.label}</text>
-          {/each}
-
-          <!-- Day-of-week labels -->
-          {#each Object.entries(ROW_LABELS) as [rowIdx, rowLabel]}
-            <text
-              x={LEFT_OFFSET - 4}
-              y={MONTH_LABEL_H + Number(rowIdx) * STRIDE + CELL / 2 + 4}
-              text-anchor="end"
-              class="dow-label">{rowLabel}</text
-            >
-          {/each}
-
-          <!-- Grid cells -->
-          {#each grid as col, w}
-            {#each col as cell, d}
-              {@const cx = LEFT_OFFSET + w * STRIDE}
-              {@const cy = MONTH_LABEL_H + d * STRIDE}
-              <rect
-                x={cx}
-                y={cy}
-                width={CELL}
-                height={CELL}
-                rx="2"
-                style="fill: {LEVEL_FILL[cell.level]}"
-                class="cell"
-                class:cell-dimmed={cell.dimmed}
-                role="img"
-                aria-label="{cell.date}: {cell.count} {m.stats_rounds().toLowerCase()}"
-                onmouseenter={(e) => showTooltip(e, cell)}
-                onmouseleave={() => {
-                  tooltip = null;
-                }}
-              />
-            {/each}
-          {/each}
-        </svg>
-
-        <!-- Cell tooltip (HTML so it matches Tooltip.svelte style and escapes SVG clipping) -->
-        {#if tooltip}
-          {@const pad = 8}
-          {@const w = tooltipEl?.offsetWidth ?? 0}
-          {@const rawLeft = tooltip.x - w / 2}
-          {@const left = Math.max(pad, Math.min(rawLeft, window.innerWidth - w - pad))}
-          {@const arrowLeft = tooltip.x - left}
-          <div
-            bind:this={tooltipEl}
-            class="cell-tooltip"
-            style="top:{tooltip.y}px;left:{left}px;--arrow-left:{arrowLeft}px"
+        <MetricSwitch bind:value={metric} />
+      </div>
+      <div class="heatmap-wrap" use:measureWidth={(width) => (containerWidth = width)}>
+        {#if calendar}
+          <svg
+            bind:this={chart}
+            width={svgWidth}
+            height={svgHeight}
+            viewBox="0 0 {svgWidth} {svgHeight}"
+            class="heatmap"
+            role="group"
+            aria-label={m.stats_year_chart_help({ year: String(selectedYear) })}
           >
-            {tooltip.text}
-          </div>
-        {/if}
-
-        <!-- Legend -->
-        <div class="legend">
-          <span class="legend-label">{m.stats_legend_less()}</span>
-          {#each [0, 1, 2, 3] as lvl}
-            <div class="legend-cell" style="background: {LEVEL_FILL[lvl]}"></div>
-          {/each}
-          <span class="legend-label">{m.stats_legend_more()}</span>
+            {#each calendar.months as month}<text
+                x={LEFT + month.week * stride}
+                y="10"
+                class="month-label">{monthName.format(new Date(selectedYear, month.month, 1))}</text
+              >{/each}
+            {#each [1, 3, 5] as day}<text
+                x={LEFT - 6}
+                y={TOP + day * stride + cellSize / 2 + 3.5}
+                text-anchor="end"
+                class="weekday-label">{weekday.format(new Date(2000, 0, 2 + day))}</text
+              >{/each}
+            {#each calendar.cells as cell (cell.date)}
+              {@const value = metric === 'time' ? cell.focus_secs : cell.count}
+              {#if cell.valid}
+                <rect
+                  x={LEFT + cell.week * stride}
+                  y={TOP + cell.weekday * stride}
+                  width={cellSize}
+                  height={cellSize}
+                  rx="2"
+                  style:fill={fills[heatLevel(value, metric)]}
+                  class="cell"
+                  class:selected={interaction.pinned === cell.date}
+                  data-day={cell.date}
+                  role="button"
+                  tabindex={cell.date === tabDate ? 0 : -1}
+                  aria-label={[fullDate.format(localDate(cell.date)), ...details(cell)].join(', ')}
+                  aria-pressed={interaction.pinned === cell.date}
+                  aria-describedby={preview?.date === cell.date ? tooltipId : undefined}
+                  onpointerenter={(event) => show(event, cell)}
+                  onpointerleave={interaction.leave}
+                  onfocus={(event) => {
+                    focusedDate = cell.date;
+                    show(event, cell, true);
+                  }}
+                  onblur={interaction.leave}
+                  onclick={() => {
+                    focusedDate = cell.date;
+                    interaction.toggle(cell.date);
+                  }}
+                  onkeydown={(event) => navigate(event, cell.date)}
+                />
+              {:else}
+                <rect
+                  x={LEFT + cell.week * stride}
+                  y={TOP + cell.weekday * stride}
+                  width={cellSize}
+                  height={cellSize}
+                  rx="2"
+                  class="dimmed"
+                  aria-hidden="true"
+                />
+              {/if}
+            {/each}
+          </svg>
+        {:else}<div class="loading">{loading ? m.stats_loading() : '—'}</div>{/if}
+      </div>
+      <div class="legend" aria-label={m.stats_heat_legend()}>
+        <span>{m.stats_legend_less()}</span>
+        {#each legend as label, level}<button
+            class="legend-cell"
+            style:background={fills[level]}
+            aria-label={label}
+            aria-describedby={legendInteraction.preview?.date === String(level)
+              ? 'yearly-legend-tooltip'
+              : undefined}
+            onpointerenter={(event) => {
+              interaction.hidePreview();
+              legendInteraction.show(String(level), event.currentTarget);
+            }}
+            onpointerleave={legendInteraction.leave}
+            onfocus={(event) => {
+              interaction.hidePreview();
+              legendInteraction.show(String(level), event.currentTarget, true);
+            }}
+            onblur={legendInteraction.leave}
+          ></button>{/each}
+        <span>{m.stats_legend_more()}</span>
+      </div>
+      <dl class="annual">
+        <div>
+          <dt>{m.stats_year_focus()}</dt>
+          <dd>{annual ? formatDuration(annual.seconds) : '—'}</dd>
         </div>
-      </div>
+        <div>
+          <dt>{m.stats_year_rounds()}</dt>
+          <dd>{annual ? number.format(annual.rounds) : '—'}</dd>
+        </div>
+        <div>
+          <dt>{m.stats_year_active()}</dt>
+          <dd>{annual ? number.format(annual.active) : '—'}</dd>
+        </div>
+        <div>
+          <dt>{m.stats_best_day()}</dt>
+          <dd>{annual?.best ? formatDuration(annual.best.focus_secs) : '—'}</dd>
+          <span class="best-date"
+            >{annual?.best ? shortDate.format(localDate(annual.best.date)) : ''}</span
+          >
+        </div>
+      </dl>
+      <DateDetails
+        date={pinned ? fullDate.format(localDate(pinned.date)) : null}
+        lines={pinned ? details(pinned) : []}
+        onclear={interaction.unpin}
+      />
     </div>
-
-    <!-- Lifetime totals -->
-    <div class="totals">
-      <div class="total-card" style="--delay: 0ms">
-        <span class="total-label">{m.stats_total_rounds()}</span>
-        <span class="total-value">{heatmap.total_rounds.toLocaleString()}</span>
-      </div>
-      <div class="total-divider"></div>
-      <div class="total-card" style="--delay: 60ms">
-        <span class="total-label">{m.stats_focus_hours()}</span>
-        <span class="total-value">{fmtHours(heatmap.total_hours)}</span>
-      </div>
-      <div class="total-divider"></div>
-      <div class="total-card" style="--delay: 120ms">
-        <span class="total-label">{m.stats_best_streak()}</span>
-        <span class="total-value">
-          {heatmap.longest_streak > 0 ? heatmap.longest_streak : '—'}
-          {#if heatmap.longest_streak > 0}
-            <span class="total-unit">{m.stats_days()}</span>
-          {/if}
-        </span>
-      </div>
-    </div>
-
-    {#if !hasData}
-      <div class="empty-overlay"><span>{m.stats_empty_history()}</span></div>
-    {/if}
-  {/if}
+  </div>
+  <div class="lifetime">
+    <h2>{m.stats_lifetime()}</h2>
+    <StatsSummary
+      compact
+      items={[
+        {
+          label: m.stats_lifetime_rounds(),
+          value: heatmap ? number.format(heatmap.total_rounds) : '—',
+        },
+        {
+          label: m.stats_lifetime_focus(),
+          value: heatmap ? formatDuration(heatmap.total_focus_secs) : '—',
+        },
+        {
+          label: m.stats_active_days(),
+          value: activeDays === null ? '—' : number.format(activeDays),
+        },
+        {
+          label: m.stats_best_streak(),
+          value: heatmap ? number.format(heatmap.longest_streak) : '—',
+        },
+      ]}
+    />
+  </div>
+  {#if interaction.preview && preview}<StatsTooltip
+      id={tooltipId}
+      anchor={interaction.preview.anchor}
+      lines={[fullDate.format(localDate(preview.date)), ...details(preview)]}
+      onenter={interaction.keep}
+      onleave={interaction.leave}
+    />{/if}
+  {#if legendInteraction.preview}<StatsTooltip
+      id="yearly-legend-tooltip"
+      anchor={legendInteraction.preview.anchor}
+      lines={[legend[Number(legendInteraction.preview.date)]]}
+      onenter={legendInteraction.keep}
+      onleave={legendInteraction.leave}
+    />{/if}
 </div>
 
 <style>
   .view {
+    min-width: 0;
+    min-height: 100%;
+    flex: 1 0 auto;
     display: flex;
     flex-direction: column;
-    height: 100%;
-    position: relative;
-    animation: app-fade-in 0.2s ease;
+    --heat-0: color-mix(in oklch, var(--color-foreground) 6%, var(--color-background));
+    --heat-1: color-mix(in oklch, var(--color-focus-round) 28%, var(--color-background));
+    --heat-2: color-mix(in oklch, var(--color-focus-round) 60%, var(--color-background));
+    --heat-3: var(--color-focus-round);
   }
-
-  .loading {
+  .year-section {
+    padding: var(--stats-block-gap, 20px) var(--stats-pad, 24px) 0;
     flex: 1;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: var(--color-foreground-darker);
-    font-size: 0.85rem;
-    opacity: 0.7;
-  }
-
-  /* ── Heatmap ──────────────────────────────────────────────── */
-  .heatmap-section {
-    flex: 1;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 16px 24px 8px;
-    overflow: hidden;
-  }
-
-  .heatmap-wrap {
     display: flex;
     flex-direction: column;
-    gap: 8px;
-    align-items: flex-start;
+    justify-content: center;
   }
-
-  /* ── Year navigation ─────────────────────────────────────── */
+  .year-group {
+    width: 100%;
+  }
+  .year-section > .year-group {
+    flex-shrink: 0;
+  }
+  .toolbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px 16px;
+    flex-wrap: wrap;
+  }
   .year-nav {
     display: flex;
     align-items: center;
     gap: 8px;
-    margin-left: 28px; /* align with heatmap grid left edge */
   }
-
   .year-label {
     font-size: 0.82rem;
     font-weight: 600;
     font-variant-numeric: tabular-nums;
-    letter-spacing: 0.04em;
-    color: var(--color-foreground-darker);
-    min-width: 3.2em;
-    text-align: center;
   }
-
-  .year-btn {
-    background: none;
-    border: none;
-    cursor: pointer;
-    color: var(--color-foreground-darker);
-    display: flex;
-    align-items: center;
-    justify-content: center;
+  .year-nav button {
+    display: grid;
+    place-items: center;
     width: 24px;
     height: 24px;
+    border: 0;
     border-radius: 4px;
+    background: transparent;
+    color: var(--color-foreground-darker);
+    cursor: pointer;
     transition:
-      color 0.15s,
-      background 0.15s;
-    padding: 0;
+      color 120ms,
+      background 120ms;
   }
-
-  .year-btn:hover:not(:disabled) {
-    color: var(--color-foreground);
+  .year-nav button:hover:not(:disabled) {
     background: var(--color-hover);
+    color: var(--color-foreground);
   }
-
-  .year-btn:disabled {
-    opacity: 0.3;
+  .year-nav button:disabled {
+    opacity: 0.35;
     cursor: default;
   }
-
-  /* ── Heatmap SVG ─────────────────────────────────────────── */
-  .heatmap-svg {
+  button:focus-visible {
+    outline: 2px solid color-mix(in oklch, var(--color-foreground) 45%, transparent);
+    outline-offset: 2px;
+  }
+  .heatmap-wrap {
+    margin-top: 12px;
+    min-width: 0;
+  }
+  .heatmap {
     display: block;
+    max-width: 100%;
+    height: auto;
     overflow: visible;
   }
-
-  .cell {
-    cursor: default;
-    transition: opacity 0.1s;
+  .month-label,
+  .weekday-label {
+    font-size: 10px;
+    fill: var(--color-foreground-darker);
   }
-
-  .cell:hover:not(.cell-dimmed) {
+  .cell {
+    cursor: pointer;
+    outline: none;
+    transition: opacity 120ms;
+    stroke-width: 1.5;
+  }
+  .cell:hover {
     opacity: 0.75;
   }
-
-  .cell-dimmed {
+  .cell.selected {
+    stroke: var(--color-foreground);
+    stroke-dasharray: 2 1;
+  }
+  .cell:focus-visible {
+    stroke: var(--color-foreground);
+    stroke-width: 2;
+  }
+  .dimmed {
+    fill: var(--heat-0);
     opacity: 0.3;
   }
-
-  .month-label {
-    fill: var(--color-foreground-darker);
-    font-size: 9px;
-    font-weight: 500;
-    letter-spacing: 0.03em;
-    cursor: default;
-  }
-
-  .dow-label {
-    fill: var(--color-foreground-darker);
-    font-size: 8px;
-    letter-spacing: 0.02em;
-    cursor: default;
-  }
-
-  .cell-tooltip {
-    --tooltip-bg: var(
-      --color-background-light,
-      color-mix(in oklch, var(--color-foreground) 10%, var(--color-background))
-    );
-    position: fixed;
-    transform: translateY(-100%);
-    background: var(--tooltip-bg);
-    color: var(--color-foreground);
-    font-size: 0.72rem;
-    line-height: 1.4;
-    padding: 5px 9px;
-    border-radius: 4px;
-    width: max-content;
-    max-width: 240px;
-    white-space: normal;
-    pointer-events: none;
-    z-index: 9999;
-    box-shadow: 0 2px 8px color-mix(in oklch, black 30%, transparent);
-    border: 1px solid color-mix(in oklch, var(--color-foreground) 12%, transparent);
-  }
-
-  .cell-tooltip::after {
-    content: '';
-    position: absolute;
-    top: 100%;
-    left: var(--arrow-left, 50%);
-    transform: translateX(-50%);
-    border: 5px solid transparent;
-    border-top-color: var(--tooltip-bg);
-  }
-
-  /* ── Legend ──────────────────────────────────────────────── */
   .legend {
     display: flex;
     align-items: center;
-    gap: 3px;
-    margin-left: 28px;
-  }
-
-  .legend-label {
-    font-size: 9px;
+    justify-content: flex-end;
+    gap: 5px;
+    min-height: 20px;
+    margin-top: 8px;
     color: var(--color-foreground-darker);
-    padding: 0 3px;
+    font-size: 0.72rem;
   }
-
   .legend-cell {
     width: 11px;
     height: 11px;
     border-radius: 2px;
+    border: 0;
+    cursor: help;
   }
-
-  /* ── Lifetime totals ─────────────────────────────────────── */
-  .totals {
-    display: flex;
-    align-items: stretch;
-    border-top: 1px solid var(--color-separator);
-    flex-shrink: 0;
+  .annual {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 12px;
+    margin: var(--stats-chart-gap, 16px) 0 8px;
   }
-
-  .total-card {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 4px;
-    padding: 18px 24px;
-    animation: card-rise 0.35s cubic-bezier(0.22, 1, 0.36, 1) both;
-    animation-delay: var(--delay, 0ms);
+  .annual > div {
+    min-width: 0;
   }
-
-  @keyframes card-rise {
-    from {
-      opacity: 0;
-      transform: translateY(6px);
-    }
-    to {
-      opacity: 1;
-      transform: translateY(0);
-    }
-  }
-
-  .total-label {
-    font-size: 0.62rem;
+  dt {
+    color: var(--color-foreground-darker);
+    font-size: 0.68rem;
     font-weight: 600;
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
-    color: var(--color-foreground-darker);
+    margin-bottom: 6px;
   }
-
-  .total-value {
-    font-size: 1.8rem;
-    font-weight: 700;
+  dd {
+    font-size: 0.95rem;
+    font-weight: 600;
     font-variant-numeric: tabular-nums;
-    letter-spacing: -0.02em;
-    color: var(--color-foreground);
-    line-height: 1;
-    display: flex;
-    align-items: baseline;
-    gap: 4px;
+    white-space: nowrap;
   }
-
-  .total-unit {
-    font-size: 0.85rem;
-    font-weight: 400;
+  .best-date {
+    font-size: 0.72rem;
     color: var(--color-foreground-darker);
   }
-
-  .total-divider {
-    width: 1px;
-    background: var(--color-separator);
-    align-self: stretch;
-    margin: 10px 0;
+  .lifetime {
+    flex-shrink: 0;
+    border-top: 1px solid var(--color-separator);
   }
-
-  /* ── Empty overlay ───────────────────────────────────────── */
-  .empty-overlay {
-    position: absolute;
-    inset: 40px 0 80px 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
+  h2 {
+    padding: 8px var(--stats-pad, 24px) 0;
+    font-size: 0.68rem;
+    font-weight: 600;
+    letter-spacing: 0.06em;
     color: var(--color-foreground-darker);
-    font-size: 0.82rem;
-    font-style: italic;
-    opacity: 0.65;
-    pointer-events: none;
+  }
+  .loading {
+    height: 120px;
+    display: grid;
+    place-items: center;
+    color: var(--color-foreground-darker);
+    font-size: 0.75rem;
+  }
+  @media (max-width: 640px) {
+    .annual {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .cell,
+    .year-nav button {
+      transition: none;
+    }
   }
 </style>

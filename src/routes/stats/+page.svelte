@@ -1,6 +1,7 @@
 <script lang="ts">
   import '../../app.css';
-  import { onMount } from 'svelte';
+  import '$lib/styles/auxiliary-scrollbars.css';
+  import { onMount, tick } from 'svelte';
   import {
     getSettings,
     getThemes,
@@ -10,120 +11,215 @@
     onSessionsCleared,
     statsGetDetailed,
     statsGetHeatmap,
+    auxiliaryWindowReady,
   } from '$lib/ipc';
   import { settings } from '$lib/stores/settings';
   import { applyTheme } from '$lib/stores/theme';
   import { setLocale } from '$lib/locale.svelte.js';
   import { resolveThemeName } from '$lib/utils/theme';
-  import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
+  import AuxiliaryWindowControls from '$lib/components/AuxiliaryWindowControls.svelte';
   import { isMac } from '$lib/utils/platform';
   import type { UnlistenFn } from '@tauri-apps/api/event';
-  import type { DetailedStats, HeatmapStats } from '$lib/types';
+  import type { DetailedStats, HeatmapStats, Theme } from '$lib/types';
   import * as m from '$paraglide/messages.js';
-  import { info, error as logError } from '@tauri-apps/plugin-log';
-
+  import { error as logError } from '@tauri-apps/plugin-log';
   import DailyView from '$lib/components/stats/DailyView.svelte';
   import WeeklyView from '$lib/components/stats/WeeklyView.svelte';
   import YearlyView from '$lib/components/stats/YearlyView.svelte';
+  import { dateKey, type Metric } from '$lib/components/stats/stats';
 
   type Tab = 'today' | 'week' | 'alltime';
-
+  const tabs: Tab[] = ['today', 'week', 'alltime'];
   let activeTab = $state<Tab>('today');
+  let weeklyMetric = $state<Metric>('time');
+  let yearlyMetric = $state<Metric>('time');
+  let selectedYear = $state(new Date().getFullYear());
+  let today = $state(dateKey(new Date()));
+  let detailedDate = $state(dateKey(new Date()));
   let detailed = $state<DetailedStats | null>(null);
   let heatmap = $state<HeatmapStats | null>(null);
-  let heatmapLoaded = $state(false);
+  let detailedLoading = $state(false);
+  let heatmapLoading = $state(false);
+  let detailedError = $state(false);
+  let heatmapError = $state(false);
+  let initError = $state(false);
+  let ready = false;
+  let disposed = false;
+  let detailedRequest = 0;
+  let heatmapRequest = 0;
+  let detailedAt = 0;
+  let heatmapAt = 0;
+  let knownThemes: Theme[] = [];
+  let content: HTMLDivElement;
+  const STALE_MS = 30_000;
+  const hasError = $derived(initError || (activeTab === 'alltime' ? heatmapError : detailedError));
+  const loading = $derived(activeTab === 'alltime' ? heatmapLoading : detailedLoading);
+  const reportError = (context: string, error: unknown) =>
+    logError(`[stats] ${context}: ${error}`).catch(() => {});
 
-  async function switchTab(tab: Tab) {
-    activeTab = tab;
-    if (tab === 'alltime' && !heatmapLoaded) {
-      try {
-        heatmap = await statsGetHeatmap();
-        heatmapLoaded = true;
-      } catch (e) {
-        await logError(`[stats] failed to load heatmap: ${e}`);
-      }
+  async function loadDetailed(force = false) {
+    if (
+      !force &&
+      (detailedLoading ||
+        (detailed &&
+          !detailedError &&
+          detailedDate === today &&
+          Date.now() - detailedAt < STALE_MS))
+    )
+      return;
+    const request = ++detailedRequest;
+    const requestedDate = dateKey(new Date());
+    detailedLoading = true;
+    try {
+      const result = await statsGetDetailed();
+      if (disposed || request !== detailedRequest) return;
+      detailed = result;
+      detailedDate = requestedDate;
+      detailedAt = Date.now();
+      detailedError = false;
+    } catch (error) {
+      if (!disposed && request === detailedRequest) detailedError = true;
+      void reportError('detailed query failed', error);
+    } finally {
+      if (!disposed && request === detailedRequest) detailedLoading = false;
     }
   }
-
-  function close() {
-    getCurrentWebviewWindow().close();
+  async function loadHeatmap(force = false) {
+    if (
+      !force &&
+      (heatmapLoading || (heatmap && !heatmapError && Date.now() - heatmapAt < STALE_MS))
+    )
+      return;
+    const request = ++heatmapRequest;
+    heatmapLoading = true;
+    try {
+      const result = await statsGetHeatmap();
+      if (disposed || request !== heatmapRequest) return;
+      heatmap = result;
+      heatmapAt = Date.now();
+      heatmapError = false;
+    } catch (error) {
+      if (!disposed && request === heatmapRequest) heatmapError = true;
+      void reportError('heatmap query failed', error);
+    } finally {
+      if (!disposed && request === heatmapRequest) heatmapLoading = false;
+    }
+  }
+  function refresh(force = false) {
+    const nextDate = dateKey(new Date());
+    const dayChanged = nextDate !== today;
+    today = nextDate;
+    if (!ready || disposed) return;
+    if (force || activeTab !== 'alltime' || dayChanged) void loadDetailed(force || dayChanged);
+    if (activeTab === 'alltime' || ((force || dayChanged) && heatmap !== null))
+      void loadHeatmap(force || dayChanged);
+  }
+  function switchTab(tab: Tab) {
+    if (activeTab === tab) return;
+    activeTab = tab;
+    if (content) content.scrollTop = 0;
+    refresh();
+  }
+  async function navigateTabs(event: KeyboardEvent) {
+    const index = tabs.indexOf(activeTab);
+    let next: Tab;
+    if (event.key === 'ArrowLeft') next = tabs[(index + 2) % 3];
+    else if (event.key === 'ArrowRight') next = tabs[(index + 1) % 3];
+    else if (event.key === 'Home') next = tabs[0];
+    else if (event.key === 'End') next = tabs[2];
+    else return;
+    event.preventDefault();
+    switchTab(next);
+    await tick();
+    document.getElementById(`stats-tab-${next}`)?.focus();
+  }
+  function syncTheme() {
+    const osDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+    const theme =
+      knownThemes.find((item) => item.name === resolveThemeName($settings, osDark)) ??
+      knownThemes[0];
+    if (theme) applyTheme(theme);
+  }
+  async function initialize() {
+    initError = false;
+    try {
+      const [saved, themes] = await Promise.all([getSettings(), getThemes()]);
+      if (disposed) return;
+      settings.set(saved);
+      knownThemes = themes;
+      setLocale(saved.language);
+      syncTheme();
+      ready = true;
+      refresh(true);
+    } catch (error) {
+      if (!disposed) initError = true;
+      void reportError('initialization failed', error);
+    } finally {
+      if (!disposed) auxiliaryWindowReady().catch((error) => reportError('show failed', error));
+    }
+  }
+  function retry() {
+    if (initError) void initialize();
+    else refresh(true);
   }
 
   onMount(() => {
     const cleanups: UnlistenFn[] = [];
-
-    (async () => {
+    async function keep(promise: Promise<UnlistenFn>) {
       try {
-        const s = await getSettings();
-        settings.set(s);
-        setLocale(s.language);
-        await info(`[stats] settings loaded, locale=${s.language}`);
-
-        const themes = await getThemes();
-        const osDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-        const activeTheme = themes.find((t) => t.name === resolveThemeName(s, osDark)) ?? themes[0];
-        if (activeTheme) applyTheme(activeTheme);
-
-        // Show window immediately after theme is applied
-        await getCurrentWebviewWindow().show();
-
-        detailed = await statsGetDetailed();
-        await info(`[stats] initialized, theme=${activeTheme?.name ?? 'none'}`);
-      } catch (e) {
-        await logError(`[stats] initialization failed: ${e}`);
-        throw e;
+        const unlisten = await promise;
+        if (disposed) unlisten();
+        else cleanups.push(unlisten);
+      } catch (error) {
+        void reportError('event subscription failed', error);
       }
-
-      cleanups.push(
-        await onRoundChange(async () => {
-          try {
-            detailed = await statsGetDetailed();
-            if (heatmapLoaded) heatmap = await statsGetHeatmap();
-          } catch (e) {
-            await logError(`[stats] failed to refresh stats after round change: ${e}`);
-          }
-        }),
-        await onSessionsCleared(async () => {
-          try {
-            detailed = await statsGetDetailed();
-            if (heatmapLoaded) heatmap = await statsGetHeatmap();
-          } catch (e) {
-            await logError(`[stats] failed to refresh stats after session clear: ${e}`);
-          }
-        }),
-        await onSettingsChanged(async (updated) => {
-          const prev = {
-            mode: $settings.theme_mode,
-            light: $settings.theme_light,
-            dark: $settings.theme_dark,
-            language: $settings.language,
-          };
-          settings.set(updated);
-          if (updated.language !== prev.language) {
-            setLocale(updated.language);
-          }
-          if (
-            updated.theme_mode !== prev.mode ||
-            updated.theme_light !== prev.light ||
-            updated.theme_dark !== prev.dark
-          ) {
-            const allThemes = await getThemes();
-            const dark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-            const t = allThemes.find((th) => th.name === resolveThemeName(updated, dark));
-            if (t) applyTheme(t);
-          }
-        }),
-        await onThemesChanged((updated) => {
-          const dark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-          const current =
-            updated.find((t) => t.name === resolveThemeName($settings, dark)) ?? updated[0];
-          if (current) applyTheme(current);
-        })
+    }
+    void keep(onRoundChange(() => refresh(true)));
+    void keep(onSessionsCleared(() => refresh(true)));
+    void keep(
+      onSettingsChanged((updated) => {
+        settings.set(updated);
+        setLocale(updated.language);
+        syncTheme();
+      })
+    );
+    void keep(
+      onThemesChanged((themes) => {
+        knownThemes = themes;
+        syncTheme();
+      })
+    );
+    const onFocus = () => refresh();
+    const onVisibility = () => {
+      if (!document.hidden) refresh();
+    };
+    const mq = window.matchMedia('(prefers-color-scheme: dark)');
+    mq.addEventListener('change', syncTheme);
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onVisibility);
+    let midnightTimer: ReturnType<typeof setTimeout>;
+    function scheduleMidnight() {
+      const now = new Date();
+      const midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+      midnightTimer = setTimeout(
+        () => {
+          refresh(true);
+          scheduleMidnight();
+        },
+        midnight.getTime() - now.getTime() + 50
       );
-    })();
-
+    }
+    scheduleMidnight();
+    void initialize();
     return () => {
-      for (const fn of cleanups) fn();
+      disposed = true;
+      ++detailedRequest;
+      ++heatmapRequest;
+      clearTimeout(midnightTimer);
+      for (const unlisten of cleanups) unlisten();
+      mq.removeEventListener('change', syncTheme);
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onVisibility);
     };
   });
 </script>
@@ -133,52 +229,67 @@
   <nav class="titlebar" class:macos={isMac} data-tauri-drag-region>
     <span class="titlebar-label">{m.stats_title()}</span>
     {#if !isMac}
-      <button class="btn-close" onclick={close} aria-label="Close">
-        <svg width="12" height="12" viewBox="0 0 12 12">
-          <line
-            x1="1"
-            y1="1"
-            x2="11"
-            y2="11"
-            stroke="currentColor"
-            stroke-width="1.5"
-            stroke-linecap="round"
-          />
-          <line
-            x1="11"
-            y1="1"
-            x2="1"
-            y2="11"
-            stroke="currentColor"
-            stroke-width="1.5"
-            stroke-linecap="round"
-          />
-        </svg>
-      </button>
+      <AuxiliaryWindowControls />
     {/if}
   </nav>
 
-  <!-- Tab bar -->
-  <div class="tabs">
-    <button class="tab" class:active={activeTab === 'today'} onclick={() => switchTab('today')}
-      >{m.stats_tab_today()}</button
-    >
-    <button class="tab" class:active={activeTab === 'week'} onclick={() => switchTab('week')}
-      >{m.stats_tab_week()}</button
-    >
-    <button class="tab" class:active={activeTab === 'alltime'} onclick={() => switchTab('alltime')}
-      >{m.stats_tab_alltime()}</button
-    >
+  <!-- Existing tab styling is retained; only keyboard and tab semantics are added. -->
+  <div class="tabs" role="tablist" aria-label={m.stats_title()}>
+    {#each tabs as tab}
+      <button
+        id="stats-tab-{tab}"
+        class="tab"
+        class:active={activeTab === tab}
+        role="tab"
+        aria-selected={activeTab === tab}
+        aria-controls="stats-panel"
+        tabindex={activeTab === tab ? 0 : -1}
+        onclick={() => switchTab(tab)}
+        onkeydown={navigateTabs}
+        >{tab === 'today'
+          ? m.stats_tab_today()
+          : tab === 'week'
+            ? m.stats_tab_week()
+            : m.stats_tab_alltime()}</button
+      >
+    {/each}
   </div>
 
-  <!-- Content -->
-  <div class="content">
+  <div
+    bind:this={content}
+    class="content aux-scroll"
+    id="stats-panel"
+    role="tabpanel"
+    aria-labelledby="stats-tab-{activeTab}"
+    aria-busy={loading}
+  >
+    {#if hasError}<div class="load-error" role="status">
+        <span>{m.stats_load_error()}</span><button onclick={retry} disabled={loading}
+          >{m.stats_retry()}</button
+        >
+      </div>{/if}
     {#if activeTab === 'today'}
-      <DailyView today={detailed?.today ?? null} />
+      {#if detailed}<DailyView today={detailed.today} date={detailedDate} />{:else}<div
+          class="initial-loading"
+        >
+          {detailedLoading ? m.stats_loading() : '—'}
+        </div>{/if}
     {:else if activeTab === 'week'}
-      <WeeklyView week={detailed?.week ?? null} streak={detailed?.streak ?? null} />
+      <WeeklyView
+        week={detailed?.week ?? null}
+        streak={detailed?.streak ?? null}
+        today={detailed ? detailedDate : today}
+        loading={detailedLoading}
+        bind:metric={weeklyMetric}
+      />
     {:else}
-      <YearlyView {heatmap} />
+      <YearlyView
+        {heatmap}
+        {today}
+        loading={heatmapLoading}
+        bind:metric={yearlyMetric}
+        bind:selectedYear
+      />
     {/if}
   </div>
 </div>
@@ -190,7 +301,6 @@
     height: 100vh;
     background: var(--color-background);
     color: var(--color-foreground);
-    animation: app-fade-in 0.18s ease;
     overflow: hidden;
     cursor: default;
   }
@@ -217,29 +327,6 @@
     text-transform: uppercase;
     color: var(--color-foreground-darker);
     pointer-events: none;
-  }
-
-  .btn-close {
-    position: absolute;
-    right: 8px;
-    background: none;
-    border: none;
-    cursor: pointer;
-    color: var(--color-foreground-darker);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 28px;
-    height: 28px;
-    border-radius: 4px;
-    transition:
-      color 0.15s,
-      background 0.15s;
-  }
-
-  .btn-close:hover {
-    color: var(--color-background);
-    background: var(--color-focus-round);
   }
 
   /* ── Tabs ──────────────────────────────────────────────── */
@@ -280,8 +367,63 @@
   /* ── Content ───────────────────────────────────────────── */
   .content {
     flex: 1;
-    overflow: hidden;
+    min-height: 0;
+    min-width: 0;
+    overflow-y: auto;
+    scrollbar-gutter: stable;
     display: flex;
     flex-direction: column;
+    --stats-pad: 24px;
+    --stats-block-gap: 20px;
+    --stats-chart-gap: 16px;
+  }
+  @media (max-height: 560px) {
+    .content {
+      --stats-pad: 16px;
+      --stats-block-gap: 12px;
+      --stats-chart-gap: 10px;
+      --stats-summary-y: 14px;
+      --stats-summary-min: 88px;
+      --stats-summary-gap: 4px;
+      --stats-number-size: 1.75rem;
+      --stats-detail-min: 40px;
+      --stats-detail-y: 4px;
+    }
+  }
+  .load-error {
+    flex-shrink: 0;
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    padding: 8px 24px;
+    color: var(--color-foreground-darker);
+    font-size: 0.75rem;
+    border-bottom: 1px solid var(--color-separator);
+  }
+  .load-error button {
+    font: inherit;
+    border: 0;
+    background: transparent;
+    color: var(--color-focus-round);
+    text-decoration: underline;
+    cursor: pointer;
+  }
+  .load-error button:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+  .initial-loading {
+    padding: 24px;
+    color: var(--color-foreground-darker);
+    font-size: 0.75rem;
+  }
+  button:focus-visible {
+    outline: 2px solid color-mix(in oklch, var(--color-foreground) 45%, transparent);
+    outline-offset: 2px;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .tab {
+      transition: none;
+    }
   }
 </style>

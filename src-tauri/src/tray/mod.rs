@@ -112,6 +112,7 @@ pub struct TrayMenuItems {
 /// Tauri-managed state for the tray icon (uses the default Wry runtime).
 pub struct TrayState {
     pub icon: Mutex<Option<TrayIcon<tauri::Wry>>>,
+    pub visible: std::sync::atomic::AtomicBool,
     pub colors: Mutex<TrayColors>,
     pub countdown_mode: Mutex<bool>,
     pub menu_items: Mutex<Option<TrayMenuItems>>,
@@ -121,6 +122,7 @@ impl TrayState {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             icon: Mutex::new(None),
+            visible: std::sync::atomic::AtomicBool::new(false),
             colors: Mutex::new(TrayColors::default()),
             countdown_mode: Mutex::new(false),
             menu_items: Mutex::new(None),
@@ -211,7 +213,9 @@ pub fn create_tray(app: &AppHandle, state: &Arc<TrayState>) {
     {
         let guard = state.icon.lock().unwrap();
         if let Some(existing) = guard.as_ref() {
-            let _ = existing.set_visible(true);
+            if existing.set_visible(true).is_ok() {
+                state.visible.store(true, std::sync::atomic::Ordering::Release);
+            }
             log::info!("[tray] shown (reused existing icon)");
             return;
         }
@@ -282,6 +286,10 @@ pub fn create_tray(app: &AppHandle, state: &Arc<TrayState>) {
             } = event
             {
                 let app = tray_icon.app_handle();
+                if crate::mini::is_active(app) {
+                    crate::mini::request_restore(app);
+                    return;
+                }
                 if let Some(window) = app.get_webview_window("main") {
                     let visible = window.is_visible().unwrap_or(false);
                     let minimized = window.is_minimized().unwrap_or(false);
@@ -292,9 +300,7 @@ pub fn create_tray(app: &AppHandle, state: &Arc<TrayState>) {
                         }
                         TrayWindowAction::Restore => {
                             log::debug!("[tray] left-click → show");
-                            let _ = window.show();
-                            let _ = window.unminimize();
-                            let _ = window.set_focus();
+                            crate::mini::request_restore(app);
                         }
                     }
                 }
@@ -319,15 +325,11 @@ pub fn create_tray(app: &AppHandle, state: &Arc<TrayState>) {
                 }
                 "show" => {
                     log::info!("[tray] show");
-                    if let Some(window) = app.get_webview_window("main") {
-                        let _ = window.show();
-                        let _ = window.unminimize();
-                        let _ = window.set_focus();
-                    }
+                    crate::mini::request_restore(app);
                 }
                 "exit" => {
                     log::info!("[tray] exit");
-                    app.exit(0);
+                    crate::mini::exit(app);
                 }
                 _ => {}
             }
@@ -337,6 +339,7 @@ pub fn create_tray(app: &AppHandle, state: &Arc<TrayState>) {
     match tray {
         Ok(t) => {
             *state.icon.lock().unwrap() = Some(t);
+            state.visible.store(true, std::sync::atomic::Ordering::Release);
             *state.menu_items.lock().unwrap() = Some(TrayMenuItems {
                 toggle: toggle_item,
                 skip: skip_item,
@@ -355,10 +358,16 @@ pub fn create_tray(app: &AppHandle, state: &Arc<TrayState>) {
 /// remove the icon on all platforms; `set_visible(false)` is the reliable path.
 pub fn destroy_tray(state: &Arc<TrayState>) {
     let guard = state.icon.lock().unwrap();
+    let mut recovery_app = None;
     if let Some(existing) = guard.as_ref() {
-        let _ = existing.set_visible(false);
+        if existing.set_visible(false).is_ok() {
+            state.visible.store(false, std::sync::atomic::Ordering::Release);
+            recovery_app = Some(existing.app_handle().clone());
+        }
         log::info!("[tray] hidden");
     }
+    drop(guard);
+    if let Some(app) = recovery_app { crate::mini::recover_if_hidden(&app); }
 }
 
 // ---------------------------------------------------------------------------

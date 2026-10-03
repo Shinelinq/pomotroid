@@ -1,15 +1,15 @@
 {
   "name": "pomotroid",
-  "version": "1.7.1",
+  "version": "1.8.0",
   "description": "A simple and visually-pleasing Pomodoro timer",
   "author": {
     "email": "flyweight@pm.me",
     "name": "Christopher Murphy",
     "url": "https://github.com/splode"
   },
-  "homepage": "https://github.com/Splode/pomotroid",
+  "homepage": "https://github.com/Shinelinq/pomotroid",
   "license": "MIT",
-  "repository": "github:splode/pomotroid",
+  "repository": "github:Shinelinq/pomotroid",
   "type": "module",
   "scripts": {
     "dev": "vite dev",

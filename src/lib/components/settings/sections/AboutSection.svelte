@@ -9,7 +9,7 @@
   import * as m from '$paraglide/messages.js';
 
   const BASE_VERSION = '1.0.0';
-  const REPO = 'https://github.com/Splode/pomotroid';
+  const REPO = 'https://github.com/Shinelinq/pomotroid';
 
   let version = $state('...');
 

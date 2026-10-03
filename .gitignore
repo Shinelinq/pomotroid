@@ -10,3 +10,34 @@ thumbs.db
 *.cert
 .svelte-kit/
 build/
+
+# Local tooling, caches and generated output
+.codex/
+.agents/
+.cache/
+coverage/
+dist/
+*.log
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+
+# User databases and their SQLite sidecars
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+
+# Windows build artifacts and installers
+*.exe
+*.msi
+*.msix

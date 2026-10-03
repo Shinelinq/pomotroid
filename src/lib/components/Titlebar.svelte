@@ -1,14 +1,37 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { getCurrentWebviewWindow, WebviewWindow } from '@tauri-apps/api/webviewWindow';
-  import { setWindowVisibility } from '$lib/ipc';
+  import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
+  import { setWindowVisibility, openMini, onMiniError, openAuxiliaryWindow } from '$lib/ipc';
   import { settings } from '$lib/stores/settings';
-  import { isMac } from '$lib/utils/platform';
+  import { isMac, isLinux } from '$lib/utils/platform';
   import Tooltip from './Tooltip.svelte';
   import * as m from '$paraglide/messages.js';
 
   let maximized = $state(false);
   let suppressTitlebarHover = $state(false);
+  let openingMini = $state(false);
+  let miniError = $state(false);
+  let miniErrorTimer: ReturnType<typeof setTimeout>;
+
+  function showMiniError() {
+    miniError = true;
+    clearTimeout(miniErrorTimer);
+    miniErrorTimer = setTimeout(() => {
+      miniError = false;
+    }, 8000);
+  }
+  async function enterMini() {
+    if (openingMini) return;
+    openingMini = true;
+    miniError = false;
+    try {
+      await openMini();
+    } catch {
+      showMiniError();
+    } finally {
+      openingMini = false;
+    }
+  }
 
   function blurTitlebarControl() {
     const active = document.activeElement;
@@ -21,6 +44,12 @@
   }
 
   onMount(() => {
+    let disposed = false;
+    let stopMiniErrors: (() => void) | undefined;
+    onMiniError(showMiniError).then((stop) => {
+      if (disposed) stop();
+      else stopMiniErrors = stop;
+    });
     const win = getCurrentWebviewWindow();
     win.isMaximized().then((v) => {
       maximized = v;
@@ -37,6 +66,9 @@
     window.addEventListener('focus', clearRestoredTitlebarFocus);
     document.addEventListener('pointermove', clearSuppressedTitlebarHover);
     return () => {
+      disposed = true;
+      stopMiniErrors?.();
+      clearTimeout(miniErrorTimer);
       unlisten.then((fn) => fn());
       window.removeEventListener('focus', clearRestoredTitlebarFocus);
       document.removeEventListener('pointermove', clearSuppressedTitlebarHover);
@@ -44,47 +76,11 @@
   });
 
   async function openSettings() {
-    const existing = await WebviewWindow.getByLabel('settings');
-    if (existing) {
-      await existing.show();
-      await existing.setFocus();
-      return;
-    }
-    new WebviewWindow('settings', {
-      url: '/settings',
-      title: 'Pomotroid — Settings',
-      width: 720,
-      height: 520,
-      // On macOS: native decorations + overlay titlebar for rounded corners and
-      // traffic light buttons. On other platforms: custom decorations-free window.
-      decorations: isMac,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      titleBarStyle: isMac ? ('Overlay' as any) : undefined,
-      hiddenTitle: isMac ? true : undefined,
-      resizable: false,
-      visible: false,
-    });
+    await openAuxiliaryWindow('settings');
   }
 
   async function openStats() {
-    const existing = await WebviewWindow.getByLabel('stats');
-    if (existing) {
-      await existing.show();
-      await existing.setFocus();
-      return;
-    }
-    new WebviewWindow('stats', {
-      url: '/stats',
-      title: 'Pomotroid — Statistics',
-      width: 840,
-      height: 520,
-      decorations: isMac,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      titleBarStyle: isMac ? ('Overlay' as any) : undefined,
-      hiddenTitle: isMac ? true : undefined,
-      resizable: false,
-      visible: false,
-    });
+    await openAuxiliaryWindow('stats');
   }
 
   async function minimize() {
@@ -192,6 +188,37 @@
       {@render statsBtn()}
       {@render settingsBtn()}
     {:else}
+      {#if !isLinux}
+        <Tooltip text={m.mini_mode()}>
+          <button
+            class="btn-icon"
+            disabled={openingMini}
+            onclick={enterMini}
+            aria-label={m.mini_mode()}
+          >
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+              <rect
+                x="1"
+                y="2"
+                width="12"
+                height="10"
+                rx="1"
+                stroke="currentColor"
+                stroke-width="1.3"
+              />
+              <rect
+                x="7"
+                y="7"
+                width="5"
+                height="4"
+                rx="0.5"
+                stroke="currentColor"
+                stroke-width="1.3"
+              />
+            </svg>
+          </button>
+        </Tooltip>
+      {/if}
       <button class="btn-icon" onclick={minimize} aria-label="Minimize">
         <svg width="12" height="12" viewBox="0 0 12 12">
           <line
@@ -276,7 +303,23 @@
   </div>
 </nav>
 
+{#if miniError}<div class="mini-error" role="alert">{m.mini_open_error()}</div>{/if}
+
 <style>
+  .mini-error {
+    position: fixed;
+    top: 42px;
+    right: 8px;
+    max-width: min(320px, calc(100vw - 16px));
+    padding: 8px 10px;
+    border: 1px solid var(--color-separator);
+    border-radius: 4px;
+    background: var(--color-background-light);
+    color: var(--color-foreground);
+    font-size: 0.75rem;
+    line-height: 1.4;
+    z-index: 9999;
+  }
   .titlebar {
     height: 40px;
     width: 100%;

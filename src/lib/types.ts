@@ -88,16 +88,20 @@ export interface DailyStats {
   focus_mins: number;
   completion_rate: number | null; // null when no sessions started today
   by_hour: number[]; // 24 entries, index = hour of day
+  by_hour_focus_secs: number[]; // 24 exact second totals, attributed by local start hour
 }
 
 export interface DayStat {
-  date: string; // "YYYY-MM-DD"
-  rounds: number;
+  date: string; // "YYYY-MM-DD", local calendar date
+  rounds: number; // completed work sessions
+  started_rounds: number; // all recorded work sessions, including incomplete ones
+  focus_secs: number; // exact seconds from completed work sessions
 }
 
 export interface HeatmapEntry {
-  date: string; // "YYYY-MM-DD"
-  count: number;
+  date: string; // "YYYY-MM-DD", local calendar date
+  count: number; // completed work sessions
+  focus_secs: number; // exact seconds from completed work sessions
 }
 
 export interface StreakInfo {
@@ -117,5 +121,12 @@ export interface HeatmapStats {
   entries: HeatmapEntry[];
   total_rounds: number;
   total_hours: number;
+  total_focus_secs: number; // exact seconds from all completed work sessions
   longest_streak: number;
+}
+
+/** Window preferences and actual tray availability, separate from main settings. */
+export interface MiniInfo {
+  always_on_top: boolean;
+  tray_available: boolean;
 }

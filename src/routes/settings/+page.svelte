@@ -1,12 +1,18 @@
 <script lang="ts">
   import '../../app.css';
+  import '$lib/styles/auxiliary-scrollbars.css';
   import { onMount } from 'svelte';
-  import { getSettings, getThemes, onSettingsChanged, onThemesChanged } from '$lib/ipc';
+  import {
+    getSettings,
+    getThemes,
+    onSettingsChanged,
+    onThemesChanged,
+    auxiliaryWindowReady,
+  } from '$lib/ipc';
   import { settings } from '$lib/stores/settings';
   import { applyTheme } from '$lib/stores/theme';
   import { resolveThemeName } from '$lib/utils/theme';
   import { setLocale } from '$lib/locale.svelte.js';
-  import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
   import type { UnlistenFn } from '@tauri-apps/api/event';
   import { info, error as logError } from '@tauri-apps/plugin-log';
   import { createLocalShortcutHandler } from '$lib/utils/localShortcuts';
@@ -78,7 +84,7 @@
         await info(`[settings] initialized, theme=${activeTheme?.name ?? 'none'}`);
 
         // Show the window now that the theme is applied (avoids white flash)
-        await getCurrentWebviewWindow().show();
+        await auxiliaryWindowReady();
       } catch (e) {
         await logError(`[settings] initialization failed: ${e}`);
         throw e;
@@ -137,7 +143,7 @@
 
   <div class="body">
     <!-- Left sidebar navigation -->
-    <aside class="sidebar">
+    <aside class="sidebar aux-scroll">
       <nav>
         {#each SECTIONS as section}
           <button
@@ -154,20 +160,22 @@
     </aside>
 
     <!-- Right content area -->
-    <main class="content">
-      {#if active === 'timer'}
-        <TimerSection />
-      {:else if active === 'appearance'}
-        <AppearanceSection />
-      {:else if active === 'notifications'}
-        <NotificationsSection />
-      {:else if active === 'shortcuts'}
-        <ShortcutsSection />
-      {:else if active === 'system'}
-        <SystemSection />
-      {:else if active === 'about'}
-        <AboutSection />
-      {/if}
+    <main class="content aux-scroll">
+      <div class="reading-width">
+        {#if active === 'timer'}
+          <TimerSection />
+        {:else if active === 'appearance'}
+          <AppearanceSection />
+        {:else if active === 'notifications'}
+          <NotificationsSection />
+        {:else if active === 'shortcuts'}
+          <ShortcutsSection />
+        {:else if active === 'system'}
+          <SystemSection />
+        {:else if active === 'about'}
+          <AboutSection />
+        {/if}
+      </div>
     </main>
   </div>
 </div>
@@ -175,15 +183,15 @@
 <style>
   .window {
     width: 100%;
-    height: 100%;
+    height: 100vh;
     display: flex;
     flex-direction: column;
     overflow: hidden;
     background: var(--color-background);
-    animation: app-fade-in 0.2s ease both;
   }
 
   .body {
+    min-width: 0;
     flex: 1;
     min-height: 0;
     display: flex;
@@ -232,8 +240,25 @@
 
   /* Content */
   .content {
+    min-height: 0;
     flex: 1;
     overflow-y: auto;
     min-width: 0;
+  }
+  .reading-width {
+    width: 100%;
+    max-width: 880px;
+    min-width: 0;
+    margin-inline: auto;
+  }
+  @media (max-width: 760px) {
+    .sidebar {
+      width: 156px;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .nav-item {
+      transition: none;
+    }
   }
 </style>

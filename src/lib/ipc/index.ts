@@ -12,6 +12,7 @@ import type {
   DetailedStats,
   HeatmapStats,
   UpdateInfo,
+  MiniInfo,
 } from '$lib/types';
 
 // --- Timer commands ---
@@ -44,6 +45,24 @@ export const notificationShow = (title: string, body: string) =>
 
 export const setWindowVisibility = (visible: boolean) =>
   invoke<void>('window_set_visibility', { visible });
+
+export const openAuxiliaryWindow = (kind: 'settings' | 'stats') => invoke<void>('aux_window_open', { kind });
+export const auxiliaryWindowReady = () => invoke<void>('aux_window_ready', {
+  token: Number(new URLSearchParams(window.location.search).get('aux') ?? 0),
+});
+
+export const openMini = () => invoke<void>('mini_open');
+export const getMiniInfo = (token: number) => invoke<MiniInfo>('mini_info', { token });
+export const miniReady = (token: number) => invoke<void>('mini_ready', { token });
+export const miniFailed = (token: number, message: string) =>
+  invoke<void>('mini_failed', { token, message });
+export const restoreFromMini = (token: number) => invoke<void>('mini_restore', { token });
+export const hideMiniToTray = (token: number) => invoke<void>('mini_hide_to_tray', { token });
+export const setMiniTop = (token: number, value: boolean) =>
+  invoke<void>('mini_set_top', { token, value });
+export const saveMiniPosition = (token: number) => invoke<void>('mini_save_position', { token });
+export const exitFromMini = (token: number) => invoke<void>('mini_exit', { token });
+export const onMiniError = (cb: () => void): Promise<UnlistenFn> => listen<void>('mini:error', cb);
 
 // --- Audio commands ---
 
