@@ -1,13 +1,17 @@
 <script lang="ts">
   import '../../app.css';
   import '$lib/styles/auxiliary-scrollbars.css';
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import {
     getSettings,
     getThemes,
     onSettingsChanged,
     onThemesChanged,
     auxiliaryWindowReady,
+    onTimerPlansFocus,
+    takeTimerPlansFocus,
+    onCategoriesFocus,
+    takeCategoriesFocus,
   } from '$lib/ipc';
   import { settings } from '$lib/stores/settings';
   import { applyTheme } from '$lib/stores/theme';
@@ -18,6 +22,7 @@
   import { createLocalShortcutHandler } from '$lib/utils/localShortcuts';
 
   import SettingsTitlebar from '$lib/components/settings/SettingsTitlebar.svelte';
+  import CategorySection from '$lib/components/categories/CategorySection.svelte';
   import TimerSection from '$lib/components/settings/sections/TimerSection.svelte';
   import AppearanceSection from '$lib/components/settings/sections/AppearanceSection.svelte';
   import NotificationsSection from '$lib/components/settings/sections/NotificationsSection.svelte';
@@ -27,10 +32,18 @@
 
   import * as m from '$paraglide/messages.js';
 
-  type Section = 'timer' | 'appearance' | 'notifications' | 'shortcuts' | 'system' | 'about';
+  type Section =
+    | 'timer'
+    | 'categories'
+    | 'appearance'
+    | 'notifications'
+    | 'shortcuts'
+    | 'system'
+    | 'about';
 
   const SECTIONS: { id: Section; label: () => string }[] = [
     { id: 'timer', label: m.nav_timer },
+    { id: 'categories', label: m.category_title },
     { id: 'appearance', label: m.nav_appearance },
     { id: 'notifications', label: m.nav_notifications },
     { id: 'shortcuts', label: m.nav_shortcuts },
@@ -39,6 +52,23 @@
   ];
 
   let active = $state<Section>('timer');
+  async function focusPlans() {
+    if (!(await takeTimerPlansFocus())) return;
+    active = 'timer';
+    await tick();
+    const field = document.getElementById('timer-plan-region');
+    field?.scrollIntoView({ block: 'nearest' });
+    field?.focus();
+  }
+
+  async function focusCategories() {
+    if (!(await takeCategoriesFocus())) return;
+    active = 'categories';
+    await tick();
+    const region = document.getElementById('category-region');
+    region?.scrollIntoView({ block: 'nearest' });
+    region?.focus();
+  }
 
   // Local shortcut state for the settings window.
   let localVolume = $state(1.0);
@@ -47,7 +77,16 @@
 
   onMount(() => {
     const cleanups: UnlistenFn[] = [];
+    let disposed = false;
+    onTimerPlansFocus(() => void focusPlans()).then((stop) => {
+      if (disposed) stop();
+      else cleanups.push(stop);
+    });
 
+    onCategoriesFocus(() => void focusCategories()).then((stop) => {
+      if (disposed) stop();
+      else cleanups.push(stop);
+    });
     // Mount local keyboard shortcut handler.
     const shortcutHandler = createLocalShortcutHandler({
       getSettings: () => $settings,
@@ -85,6 +124,8 @@
 
         // Show the window now that the theme is applied (avoids white flash)
         await auxiliaryWindowReady();
+        await focusPlans();
+        await focusCategories();
       } catch (e) {
         await logError(`[settings] initialization failed: ${e}`);
         throw e;
@@ -133,6 +174,7 @@
     })();
 
     return () => {
+      disposed = true;
       for (const fn of cleanups) fn();
     };
   });
@@ -164,6 +206,8 @@
       <div class="reading-width">
         {#if active === 'timer'}
           <TimerSection />
+        {:else if active === 'categories'}
+          <CategorySection />
         {:else if active === 'appearance'}
           <AppearanceSection />
         {:else if active === 'notifications'}

@@ -6,6 +6,7 @@
 ///
 /// Sleep/wake behaviour (OQ-1): on `Suspend` the engine saves `elapsed_secs`
 /// and blocks; on `WakeResume` it restarts from that position without advancing.
+use std::collections::VecDeque;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
@@ -22,26 +23,52 @@ pub enum TimerCommand {
     /// Immediately fires a `Complete` event (user-initiated skip).
     Skip,
     /// Change the total duration; moves engine to Idle so caller must Start.
-    Reconfigure { duration_secs: u32 },
+    Reconfigure {
+        duration_secs: u32,
+    },
     /// Update the stored duration without altering phase or elapsed time.
     /// Used to arm the next round/reset path without clobbering a fresh Start.
-    Prime { duration_secs: u32 },
+    Prime {
+        duration_secs: u32,
+    },
     /// OS sleep detected: freeze elapsed position, block until WakeResume.
     Suspend,
     /// OS wake detected: resume from the saved elapsed position.
     WakeResume,
+    /// Serialized controller operation; does not change the clock or phase.
+    Dispatch(u64),
     Shutdown,
 }
 
 #[derive(Debug, Clone)]
 pub enum TimerEvent {
-    Started { total_secs: u32 },
-    Tick { elapsed_secs: u32, total_secs: u32 },
-    Complete { skipped: bool },
-    Paused { elapsed_secs: u32 },
-    Resumed { elapsed_secs: u32 },
+    Started {
+        total_secs: u32,
+    },
+    Tick {
+        elapsed_secs: u32,
+        total_secs: u32,
+    },
+    Complete {
+        skipped: bool,
+    },
+    Paused {
+        elapsed_secs: u32,
+    },
+    Resumed {
+        elapsed_secs: u32,
+    },
     Reset,
-    Suspended { elapsed_secs: u32 },
+    Suspended {
+        elapsed_secs: u32,
+    },
+    Dispatch {
+        id: u64,
+        reply: Sender<Vec<TimerCommand>>,
+    },
+    Boundary {
+        reply: Sender<Vec<TimerCommand>>,
+    },
 }
 
 /// Cheap-to-clone handle for sending commands to the engine thread.
@@ -62,12 +89,27 @@ impl EngineHandle {
 /// `tick_interval` is 1 second in production; tests pass a shorter value
 /// (e.g. 20 ms) to keep test execution fast.
 pub fn spawn(duration_secs: u32, tick_interval: Duration) -> (EngineHandle, Receiver<TimerEvent>) {
+    spawn_inner(duration_secs, tick_interval, false)
+}
+
+pub fn spawn_controlled(
+    duration_secs: u32,
+    tick_interval: Duration,
+) -> (EngineHandle, Receiver<TimerEvent>) {
+    spawn_inner(duration_secs, tick_interval, true)
+}
+
+fn spawn_inner(
+    duration_secs: u32,
+    tick_interval: Duration,
+    controlled: bool,
+) -> (EngineHandle, Receiver<TimerEvent>) {
     let (cmd_tx, cmd_rx) = mpsc::channel::<TimerCommand>();
     let (event_tx, event_rx) = mpsc::channel::<TimerEvent>();
 
     std::thread::Builder::new()
         .name("timer-engine".to_string())
-        .spawn(move || run_loop(duration_secs, event_tx, cmd_rx, tick_interval))
+        .spawn(move || run_loop(duration_secs, event_tx, cmd_rx, tick_interval, controlled))
         .expect("failed to spawn timer engine thread");
 
     (EngineHandle { cmd_tx }, event_rx)
@@ -99,20 +141,61 @@ enum Transition {
     Break,
 }
 
+// Controller operations share the engine's event order. A boundary handshake arms
+// the next round before any later user operation can reach it. The original
+// monotonic tick deadline is retained while control requests are processed.
+fn receive_command(
+    rx: &Receiver<TimerCommand>,
+    tx: &Sender<TimerEvent>,
+    queued: &mut VecDeque<TimerCommand>,
+    deadline: Option<Instant>,
+) -> Result<TimerCommand, RecvTimeoutError> {
+    loop {
+        let command = if let Some(command) = queued.pop_front() {
+            command
+        } else if let Some(deadline) = deadline {
+            rx.recv_timeout(deadline.saturating_duration_since(Instant::now()))?
+        } else {
+            rx.recv().map_err(|_| RecvTimeoutError::Disconnected)?
+        };
+        if let TimerCommand::Dispatch(id) = command {
+            let (reply, result) = mpsc::channel();
+            tx.send(TimerEvent::Dispatch { id, reply })
+                .map_err(|_| RecvTimeoutError::Disconnected)?;
+            queued.extend(result.recv().map_err(|_| RecvTimeoutError::Disconnected)?);
+        } else {
+            return Ok(command);
+        }
+    }
+}
+
+fn boundary(tx: &Sender<TimerEvent>, queued: &mut VecDeque<TimerCommand>, controlled: bool) {
+    if controlled {
+        let (reply, result) = mpsc::channel();
+        if tx.send(TimerEvent::Boundary { reply }).is_ok() {
+            if let Ok(commands) = result.recv() {
+                queued.extend(commands);
+            }
+        }
+    }
+}
+
 fn run_loop(
     duration_secs: u32,
     event_tx: Sender<TimerEvent>,
     cmd_rx: Receiver<TimerCommand>,
     tick_interval: Duration,
+    controlled: bool,
 ) {
     let mut total_secs = duration_secs;
     let mut elapsed_secs: u32 = 0;
     let mut phase = Phase::Idle;
+    let mut queued = VecDeque::new();
 
     'engine: loop {
         let tr = match &mut phase {
             // -----------------------------------------------------------------
-            Phase::Idle => match cmd_rx.recv() {
+            Phase::Idle => match receive_command(&cmd_rx, &event_tx, &mut queued, None) {
                 Ok(TimerCommand::Start) => {
                     elapsed_secs = 0;
                     let _ = event_tx.send(TimerEvent::Started { total_secs });
@@ -137,11 +220,13 @@ fn run_loop(
                 Ok(TimerCommand::Reset) => {
                     elapsed_secs = 0;
                     let _ = event_tx.send(TimerEvent::Reset);
+                    boundary(&event_tx, &mut queued, controlled);
                     Transition::Stay
                 }
                 // Skip while Idle: advance to the next round without starting.
                 Ok(TimerCommand::Skip) => {
                     let _ = event_tx.send(TimerEvent::Complete { skipped: true });
+                    boundary(&event_tx, &mut queued, controlled);
                     Transition::Stay
                 }
                 Ok(TimerCommand::Shutdown) | Err(_) => Transition::Break,
@@ -149,56 +234,62 @@ fn run_loop(
             },
 
             // -----------------------------------------------------------------
-            Phase::Paused | Phase::Suspended => match cmd_rx.recv() {
-                Ok(TimerCommand::Resume | TimerCommand::WakeResume) => {
-                    let _ = event_tx.send(TimerEvent::Resumed { elapsed_secs });
-                    Transition::To(Phase::Running(RunningSegment {
-                        start: Instant::now(),
-                        elapsed_at_start: elapsed_secs,
-                        ticks: 0,
-                    }))
+            Phase::Paused | Phase::Suspended => {
+                match receive_command(&cmd_rx, &event_tx, &mut queued, None) {
+                    Ok(TimerCommand::Resume | TimerCommand::WakeResume) => {
+                        let _ = event_tx.send(TimerEvent::Resumed { elapsed_secs });
+                        Transition::To(Phase::Running(RunningSegment {
+                            start: Instant::now(),
+                            elapsed_at_start: elapsed_secs,
+                            ticks: 0,
+                        }))
+                    }
+                    Ok(TimerCommand::Reset) => {
+                        elapsed_secs = 0;
+                        let _ = event_tx.send(TimerEvent::Reset);
+                        boundary(&event_tx, &mut queued, controlled);
+                        Transition::To(Phase::Idle)
+                    }
+                    Ok(TimerCommand::Skip) => {
+                        elapsed_secs = 0;
+                        let _ = event_tx.send(TimerEvent::Complete { skipped: true });
+                        boundary(&event_tx, &mut queued, controlled);
+                        Transition::To(Phase::Idle)
+                    }
+                    Ok(TimerCommand::Reconfigure { duration_secs: d }) => {
+                        total_secs = d;
+                        elapsed_secs = 0;
+                        Transition::To(Phase::Idle)
+                    }
+                    Ok(TimerCommand::Prime { duration_secs: d }) => {
+                        // Clamp so a stale Prime never causes immediate completion
+                        // on the next Resume tick.
+                        total_secs = d.max(elapsed_secs.saturating_add(1));
+                        Transition::Stay
+                    }
+                    Ok(TimerCommand::Shutdown) | Err(_) => Transition::Break,
+                    _ => Transition::Stay,
                 }
-                Ok(TimerCommand::Reset) => {
-                    elapsed_secs = 0;
-                    let _ = event_tx.send(TimerEvent::Reset);
-                    Transition::To(Phase::Idle)
-                }
-                Ok(TimerCommand::Skip) => {
-                    elapsed_secs = 0;
-                    let _ = event_tx.send(TimerEvent::Complete { skipped: true });
-                    Transition::To(Phase::Idle)
-                }
-                Ok(TimerCommand::Reconfigure { duration_secs: d }) => {
-                    total_secs = d;
-                    elapsed_secs = 0;
-                    Transition::To(Phase::Idle)
-                }
-                Ok(TimerCommand::Prime { duration_secs: d }) => {
-                    // Clamp so a stale Prime never causes immediate completion
-                    // on the next Resume tick.
-                    total_secs = d.max(elapsed_secs.saturating_add(1));
-                    Transition::Stay
-                }
-                Ok(TimerCommand::Shutdown) | Err(_) => Transition::Break,
-                _ => Transition::Stay,
-            },
+            }
 
             // -----------------------------------------------------------------
             Phase::Running(seg) => {
                 // Drift-correcting sleep: target the absolute instant of the
                 // next scheduled tick rather than sleeping for a fixed period.
                 let next_tick = seg.start + tick_interval * (seg.ticks + 1);
-                let wait = next_tick.saturating_duration_since(Instant::now());
-
-                match cmd_rx.recv_timeout(wait) {
+                match receive_command(&cmd_rx, &event_tx, &mut queued, Some(next_tick)) {
                     // --- tick fired ---
                     Err(RecvTimeoutError::Timeout) => {
                         seg.ticks += 1;
                         elapsed_secs = seg.elapsed_at_start + seg.ticks;
-                        let _ = event_tx.send(TimerEvent::Tick { elapsed_secs, total_secs });
+                        let _ = event_tx.send(TimerEvent::Tick {
+                            elapsed_secs,
+                            total_secs,
+                        });
 
                         if elapsed_secs >= total_secs {
                             let _ = event_tx.send(TimerEvent::Complete { skipped: false });
+                            boundary(&event_tx, &mut queued, controlled);
                             elapsed_secs = 0;
                             Transition::To(Phase::Idle)
                         } else {
@@ -219,11 +310,13 @@ fn run_loop(
                     Ok(TimerCommand::Skip) => {
                         elapsed_secs = 0;
                         let _ = event_tx.send(TimerEvent::Complete { skipped: true });
+                        boundary(&event_tx, &mut queued, controlled);
                         Transition::To(Phase::Idle)
                     }
                     Ok(TimerCommand::Reset) => {
                         elapsed_secs = 0;
                         let _ = event_tx.send(TimerEvent::Reset);
+                        boundary(&event_tx, &mut queued, controlled);
                         Transition::To(Phase::Idle)
                     }
                     Ok(TimerCommand::Reconfigure { duration_secs: d }) => {
@@ -332,13 +425,28 @@ mod tests {
         let (handle, rx) = spawn(6, TICK);
         handle.send(TimerCommand::Start);
 
-        // Let 2 ticks fire, then pause.
-        std::thread::sleep(TICK * 2 + TICK / 2);
+        // Wait for observed ticks, not OS scheduling relative to thread creation.
+        let mut observed = Vec::new();
+        loop {
+            let event = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            let ready = matches!(
+                event,
+                TimerEvent::Tick {
+                    elapsed_secs: 2,
+                    ..
+                }
+            );
+            observed.push(event);
+            if ready {
+                break;
+            }
+        }
         handle.send(TimerCommand::Pause);
 
         // Collect events so far.
         std::thread::sleep(TICK * 3); // no ticks should arrive during this gap
-        let events_before_resume = drain(&rx);
+        observed.extend(drain(&rx));
+        let events_before_resume = observed;
 
         let paused = events_before_resume
             .iter()
@@ -349,7 +457,10 @@ mod tests {
             .filter(|e| matches!(e, TimerEvent::Tick { .. }))
             .count();
         assert_eq!(paused, 1, "expected 1 Paused event");
-        assert!(ticks_before_pause >= 2, "should have at least 2 ticks before pause");
+        assert!(
+            ticks_before_pause >= 2,
+            "should have at least 2 ticks before pause"
+        );
 
         // Resume and let the rest complete.
         handle.send(TimerCommand::Resume);
@@ -383,7 +494,9 @@ mod tests {
         );
         // No Complete should have fired.
         assert!(
-            !events.iter().any(|e| matches!(e, TimerEvent::Complete { .. })),
+            !events
+                .iter()
+                .any(|e| matches!(e, TimerEvent::Complete { .. })),
             "Complete must not fire on Reset"
         );
     }
@@ -397,7 +510,9 @@ mod tests {
 
         let events = collect_until_complete(&rx, Duration::from_millis(500));
         assert!(
-            events.iter().any(|e| matches!(e, TimerEvent::Complete { .. })),
+            events
+                .iter()
+                .any(|e| matches!(e, TimerEvent::Complete { .. })),
             "Skip must trigger Complete"
         );
         // Should have completed well before 30 ticks elapsed.
@@ -413,8 +528,17 @@ mod tests {
         let (handle, rx) = spawn(10, TICK);
         handle.send(TimerCommand::Start);
 
-        // Let 3 ticks fire, then suspend.
-        std::thread::sleep(TICK * 3 + TICK / 2);
+        loop {
+            if matches!(
+                rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+                TimerEvent::Tick {
+                    elapsed_secs: 3,
+                    ..
+                }
+            ) {
+                break;
+            }
+        }
         handle.send(TimerCommand::Suspend);
 
         let before = drain(&rx);
@@ -430,13 +554,18 @@ mod tests {
             "expected Suspended event with elapsed_secs"
         );
         let saved = suspended_elapsed.unwrap();
-        assert!(saved >= 3, "elapsed at suspend should be >= 3 s, got {saved}");
+        assert!(
+            saved >= 3,
+            "elapsed at suspend should be >= 3 s, got {saved}"
+        );
 
         // Gap: simulate OS sleep (no ticks must fire).
         std::thread::sleep(TICK * 5);
         let during_suspend = drain(&rx);
         assert!(
-            !during_suspend.iter().any(|e| matches!(e, TimerEvent::Tick { .. })),
+            !during_suspend
+                .iter()
+                .any(|e| matches!(e, TimerEvent::Tick { .. })),
             "no ticks must fire while suspended"
         );
 
@@ -457,7 +586,9 @@ mod tests {
             "Resumed event must carry the same elapsed_secs as Suspended"
         );
         assert!(
-            after.iter().any(|e| matches!(e, TimerEvent::Complete { .. })),
+            after
+                .iter()
+                .any(|e| matches!(e, TimerEvent::Complete { .. })),
             "timer must complete after WakeResume"
         );
     }
@@ -501,7 +632,10 @@ mod tests {
             .iter()
             .filter(|e| matches!(e, TimerEvent::Tick { .. }))
             .count();
-        assert_eq!(ticks, 3, "Reconfigure to 3s should yield 3 ticks, got {ticks}");
+        assert_eq!(
+            ticks, 3,
+            "Reconfigure to 3s should yield 3 ticks, got {ticks}"
+        );
         assert!(
             matches!(events.last(), Some(TimerEvent::Complete { .. })),
             "last event must be Complete after reconfigured timer"
@@ -522,7 +656,10 @@ mod tests {
             .iter()
             .filter(|e| matches!(e, TimerEvent::Tick { .. }))
             .count();
-        assert_eq!(ticks, 3, "Prime to 3s should keep the timer running and yield 3 ticks, got {ticks}");
+        assert_eq!(
+            ticks, 3,
+            "Prime to 3s should keep the timer running and yield 3 ticks, got {ticks}"
+        );
         assert!(
             matches!(events.last(), Some(TimerEvent::Complete { .. })),
             "last event must be Complete after priming a fresh start"
@@ -536,8 +673,18 @@ mod tests {
         // should run at least one more tick first.
         let (handle, rx) = spawn(10, TICK);
         handle.send(TimerCommand::Start);
-        // Let 5 ticks fire so elapsed_secs = 5.
-        std::thread::sleep(TICK * 5 + TICK / 2);
+        // Observe the engine, rather than assuming a sleep produced five ticks.
+        loop {
+            if matches!(
+                rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+                TimerEvent::Tick {
+                    elapsed_secs: 5,
+                    ..
+                }
+            ) {
+                break;
+            }
+        }
         // Prime with duration below elapsed — without the clamp this would fire
         // Complete on the very next tick.
         handle.send(TimerCommand::Prime { duration_secs: 2 });
@@ -563,11 +710,25 @@ mod tests {
         // must not cause immediate completion on the first tick after Resume.
         let (handle, rx) = spawn(10, TICK);
         handle.send(TimerCommand::Start);
-        // Let 5 ticks fire, then pause.
-        std::thread::sleep(TICK * 5 + TICK / 2);
+        loop {
+            if matches!(
+                rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+                TimerEvent::Tick {
+                    elapsed_secs: 5,
+                    ..
+                }
+            ) {
+                break;
+            }
+        }
         handle.send(TimerCommand::Pause);
-        std::thread::sleep(TICK); // let Paused event arrive
-        drain(&rx);
+        let paused_at = loop {
+            if let TimerEvent::Paused { elapsed_secs } =
+                rx.recv_timeout(Duration::from_secs(2)).unwrap()
+            {
+                break elapsed_secs;
+            }
+        };
 
         // Prime with duration below elapsed.
         handle.send(TimerCommand::Prime { duration_secs: 2 });
@@ -576,7 +737,9 @@ mod tests {
         let events = collect_until_complete(&rx, Duration::from_secs(2));
         let ticks_after_resume: Vec<_> = events
             .iter()
-            .filter(|e| matches!(e, TimerEvent::Tick { elapsed_secs, .. } if *elapsed_secs > 5))
+            .filter(
+                |e| matches!(e, TimerEvent::Tick { elapsed_secs, .. } if *elapsed_secs > paused_at),
+            )
             .collect();
         assert!(
             !ticks_after_resume.is_empty(),

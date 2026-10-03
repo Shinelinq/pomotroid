@@ -1,9 +1,9 @@
 import { onDestroy } from 'svelte';
 
 /** Window-local chart interaction; never persists or changes timer state. */
-export function createChartInteraction() {
+export function createChartInteraction(initialPinned: string | null = null) {
   let preview = $state<{ date: string; anchor: Element } | null>(null);
-  let pinned = $state<string | null>(null);
+  let pinned = $state<string | null>(initialPinned);
   let showTimer: ReturnType<typeof setTimeout> | undefined;
   let hideTimer: ReturnType<typeof setTimeout> | undefined;
 

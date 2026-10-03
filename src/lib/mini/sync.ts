@@ -4,6 +4,7 @@ type Unlisten = () => void;
 type Listener<T> = (callback: (value: T) => void) => Promise<Unlisten>;
 export interface MiniTimerApi {
   getTimerState(): Promise<TimerState>;
+  onTimerState?: Listener<TimerState>;
   onTimerTick: Listener<{ elapsed_secs: number; total_secs: number }>;
   onTimerPaused: Listener<{ elapsed_secs: number }>;
   onTimerResumed: Listener<{ elapsed_secs: number }>;
@@ -23,6 +24,7 @@ export function syncMiniTimer(
   function receive(patch: Partial<TimerState>, full = false, tick = false) {
     ++revision;
     if (disposed) return;
+    if (full && state && patch.revision !== undefined && patch.revision < state.revision) return;
     if (!state && !full) return;
     const previous = state;
     state = full ? (patch as TimerState) : { ...state!, ...patch };
@@ -46,15 +48,23 @@ export function syncMiniTimer(
   }
   const ready = (async () => {
     try {
-      await Promise.all([
-        keep(
-          api.onTimerTick((p) => receive({ ...p, is_running: true, is_paused: false }, false, true))
-        ),
-        keep(api.onTimerPaused((p) => receive({ ...p, is_running: false, is_paused: true }))),
-        keep(api.onTimerResumed((p) => receive({ ...p, is_running: true, is_paused: false }))),
-        keep(api.onRoundChange((p) => receive(p, true))),
-        keep(api.onTimerReset((p) => receive(p, true))),
-      ]);
+      await Promise.all(
+        api.onTimerState
+          ? [keep(api.onTimerState((p) => receive(p, true, true)))]
+          : [
+              keep(
+                api.onTimerTick((p) =>
+                  receive({ ...p, is_running: true, is_paused: false }, false, true)
+                )
+              ),
+              keep(api.onTimerPaused((p) => receive({ ...p, is_running: false, is_paused: true }))),
+              keep(
+                api.onTimerResumed((p) => receive({ ...p, is_running: true, is_paused: false }))
+              ),
+              keep(api.onRoundChange((p) => receive(p, true))),
+              keep(api.onTimerReset((p) => receive(p, true))),
+            ]
+      );
       while (!disposed) {
         const before = revision;
         const snapshot = await api.getTimerState();

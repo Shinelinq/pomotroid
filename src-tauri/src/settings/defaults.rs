@@ -10,6 +10,7 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     ("auto_start_work", "true"),
     ("auto_start_break", "true"),
     ("tray_icon_enabled", "false"),
+    ("tray_display_mode", "progress"),
     ("min_to_tray", "false"),
     ("min_to_tray_on_close", "false"),
     ("notifications", "false"),

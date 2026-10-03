@@ -54,6 +54,48 @@ pub fn timer_get_state(timer: State<'_, TimerController>) -> TimerSnapshot {
     timer.get_snapshot()
 }
 
+#[tauri::command]
+pub fn timer_plans_get(timer: State<'_, TimerController>) -> crate::timer::PlanState { timer.plans() }
+
+#[tauri::command]
+pub async fn timer_plans_action(app: AppHandle, action: crate::timer::plans::PlanAction) -> Result<crate::timer::PlanState, String> {
+    tauri::async_runtime::spawn_blocking(move || app.state::<TimerController>().plan_action(action)).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn timer_plans_manage(app: AppHandle) -> Result<(), String> {
+    app.state::<TimerController>().categories_focus.store(false, std::sync::atomic::Ordering::Release);
+    app.state::<TimerController>().plans_focus.store(true, std::sync::atomic::Ordering::Release);
+    crate::auxiliary_windows::open(app.clone(), crate::auxiliary_windows::Kind::Settings).await?;
+    app.emit_to("settings", "plans:focus", ()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn timer_plans_take_focus(timer: State<'_, TimerController>) -> bool {
+    timer.plans_focus.swap(false, std::sync::atomic::Ordering::AcqRel)
+}
+
+#[tauri::command]
+pub fn categories_get(timer: State<'_, TimerController>) -> crate::timer::CategoryState { timer.categories() }
+
+#[tauri::command]
+pub async fn categories_action(app: AppHandle, action: crate::db::categories::CategoryAction) -> Result<crate::timer::CategoryState, String> {
+    tauri::async_runtime::spawn_blocking(move || app.state::<TimerController>().category_action(action)).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn categories_manage(app: AppHandle) -> Result<(), String> {
+    app.state::<TimerController>().plans_focus.store(false, std::sync::atomic::Ordering::Release);
+    app.state::<TimerController>().categories_focus.store(true, std::sync::atomic::Ordering::Release);
+    crate::auxiliary_windows::open(app.clone(), crate::auxiliary_windows::Kind::Settings).await?;
+    app.emit_to("settings", "categories:focus", ()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn categories_take_focus(timer: State<'_, TimerController>) -> bool {
+    timer.categories_focus.swap(false, std::sync::atomic::Ordering::AcqRel)
+}
+
 // ---------------------------------------------------------------------------
 // CMD-02 — Settings commands
 // ---------------------------------------------------------------------------
@@ -73,7 +115,7 @@ pub fn settings_get(db: State<'_, DbState>) -> Result<Settings, String> {
 /// `key` must be one of the DB column names (see `settings::defaults::DEFAULTS`).
 /// `value` is always a string; the loader converts it to the appropriate type.
 #[tauri::command]
-pub fn settings_set(
+pub async fn settings_set(
     key: String,
     value: String,
     db: State<'_, DbState>,
@@ -82,6 +124,13 @@ pub fn settings_set(
     ws_state: State<'_, Arc<WsState>>,
     app: AppHandle,
 ) -> Result<Settings, String> {
+    if crate::timer::plans::CONFIG_KEYS.contains(&key.as_str()) {
+        timer_plans_action(app, crate::timer::plans::PlanAction::Edit { key, value }).await?;
+        return settings::load(&*db.lock().map_err(|e| e.to_string())?).map_err(|e| e.to_string());
+    }
+    if key == crate::db::categories::SELECTION_KEY { return Err("category_invalid_action".into()); }
+    if key == crate::timer::plans::STORAGE_KEY { return Err("plan_invalid_config".into()); }
+    if key == "tray_display_mode" && !matches!(value.as_str(), "progress" | "minutes") { return Err("invalid tray display mode".into()); }
     log::debug!("[settings] set {key}={value}");
     let new_settings = {
         let conn = db.lock().map_err(|e| e.to_string())?;
@@ -116,13 +165,6 @@ pub fn settings_set(
     // Keep the timer engine in sync when time-related settings change.
     timer.apply_settings(new_settings.clone());
 
-    // Broadcast an updated snapshot so the frontend immediately reflects any
-    // changed settings (round count, durations, etc.) regardless of timer
-    // state.  The timer:reset handler only calls timerState.set(), so emitting
-    // while running does not interrupt the countdown; the next timer:tick
-    // event will reconcile total_secs from the engine within one second.
-    app.emit("timer:reset", &timer.get_snapshot()).ok();
-
     // Propagate volume and tick-sound changes to the audio engine (optional state).
     if let Some(audio) = app.try_state::<Arc<AudioManager>>() {
         audio.apply_settings(&new_settings);
@@ -138,38 +180,6 @@ pub fn settings_set(
             let effective_aot = new_settings.always_on_top
                 && !(new_settings.break_always_on_top && is_break);
             let _ = window.set_always_on_top(effective_aot);
-        }
-    }
-
-    // Sync tray countdown mode when the dial setting changes, then immediately
-    // re-render the icon so it matches the dial without waiting for a timer event.
-    if key == "dial_countdown" {
-        *tray_state.countdown_mode.lock().unwrap() = new_settings.dial_countdown;
-        let snap = timer.get_snapshot();
-        let progress = if snap.total_secs > 0 {
-            snap.elapsed_secs as f32 / snap.total_secs as f32
-        } else {
-            0.0
-        };
-        tray::update_icon(&tray_state, &snap.round_type, snap.is_paused, progress);
-    }
-
-    // Update tray icon colors when the active theme changes.
-    if matches!(key.as_str(), "theme_mode" | "theme_light" | "theme_dark") {
-        let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-        let tray_theme_name = match new_settings.theme_mode.as_str() {
-            "dark" => &new_settings.theme_dark,
-            _ => &new_settings.theme_light,
-        };
-        if let Some(theme) = themes::find(&data_dir, tray_theme_name) {
-            *tray_state.colors.lock().unwrap() = tray::TrayColors::from_colors_map(&theme.colors);
-            let snap = timer.get_snapshot();
-            let progress = if snap.total_secs > 0 {
-                snap.elapsed_secs as f32 / snap.total_secs as f32
-            } else {
-                0.0
-            };
-            tray::update_icon(&tray_state, &snap.round_type, snap.is_paused, progress);
         }
     }
 
@@ -234,22 +244,25 @@ pub fn shortcuts_reload(db: State<'_, DbState>, app: AppHandle) -> Result<(), St
 
 /// Reset all settings to factory defaults and return the resulting settings.
 #[tauri::command]
-pub fn settings_reset_defaults(
+pub async fn settings_reset_defaults(
     db: State<'_, DbState>,
     timer: State<'_, TimerController>,
     tray_state: State<'_, Arc<TrayState>>,
     app: AppHandle,
 ) -> Result<Settings, String> {
     log::info!("[settings] reset to defaults");
-    let new_settings = {
+    {
         let conn = db.lock().map_err(|e| e.to_string())?;
         // Delete all rows so seed_defaults can insert fresh defaults.
-        conn.execute("DELETE FROM settings", [])
+        conn.execute("DELETE FROM settings WHERE key != ?1 AND key != 'focus_category_id' AND key NOT IN ('time_work_secs', 'time_short_break_secs', 'time_long_break_secs', 'work_rounds', 'short_breaks_enabled', 'long_breaks_enabled', 'auto_start_work', 'auto_start_break')", [crate::timer::plans::STORAGE_KEY])
             .map_err(|e| e.to_string())?;
         settings::seed_defaults(&conn).map_err(|e| e.to_string())?;
-        settings::load(&conn).map_err(|e| e.to_string())?
     };
 
+    timer_plans_action(app.clone(), crate::timer::plans::PlanAction::ReplaceConfig {
+        config: crate::timer::plans::TimerConfig::from_settings(&Settings::default()),
+    }).await?;
+    let new_settings = settings::load(&*db.lock().map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     timer.apply_settings(new_settings.clone());
     *tray_state.countdown_mode.lock().unwrap() = new_settings.dial_countdown;
 
@@ -337,40 +350,56 @@ pub fn sessions_clear(db: State<'_, DbState>, app: AppHandle) -> Result<(), Stri
 
 /// Batched stats for Today + This Week tabs (minimises IPC round-trips).
 #[tauri::command]
-pub fn stats_get_detailed(db: State<'_, DbState>) -> Result<DetailedStats, String> {
+pub fn stats_get_detailed(db: State<'_, DbState>, filter: Option<crate::db::categories::CategoryFilter>) -> Result<DetailedStats, String> {
     let conn = db.lock().map_err(|e| e.to_string())?;
-    let today = queries::get_daily_stats(&conn).map_err(|e| {
+    let filter = filter.unwrap_or_default();
+    let today = queries::get_daily_stats_filtered(&conn, &filter).map_err(|e| {
         log::error!("[stats] failed to query daily stats: {e}");
         e.to_string()
     })?;
-    let week = queries::get_weekly_stats(&conn).map_err(|e| {
+    let week = queries::get_weekly_stats_filtered(&conn, &filter).map_err(|e| {
         log::error!("[stats] failed to query weekly stats: {e}");
         e.to_string()
     })?;
-    let streak = queries::get_streak(&conn).map_err(|e| {
+    let streak = queries::get_streak_filtered(&conn, &filter).map_err(|e| {
         log::error!("[stats] failed to query streak: {e}");
         e.to_string()
     })?;
     Ok(DetailedStats { today, week, streak })
 }
 
-/// Heatmap data + lifetime totals for the All Time tab.
+/// Read-only work records. Runtime status is read through the existing timer snapshot.
 #[tauri::command]
-pub fn stats_get_heatmap(db: State<'_, DbState>) -> Result<HeatmapStats, String> {
+pub fn stats_get_sessions(db: State<'_, DbState>, query: crate::db::session_details::SessionQuery) -> Result<crate::db::session_details::SessionPage, String> {
     let conn = db.lock().map_err(|e| e.to_string())?;
-    query_heatmap_stats(&conn)
+    crate::db::session_details::query(&conn, &query).map_err(|error| {
+        log::error!("[stats] session detail query failed: {error}");
+        error
+    })
 }
 
+/// Heatmap data + lifetime totals for the All Time tab.
+#[tauri::command]
+pub fn stats_get_heatmap(db: State<'_, DbState>, filter: Option<crate::db::categories::CategoryFilter>) -> Result<HeatmapStats, String> {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    query_heatmap_stats_filtered(&conn, &filter.unwrap_or_default())
+}
+
+#[cfg(test)]
 fn query_heatmap_stats(conn: &rusqlite::Connection) -> Result<HeatmapStats, String> {
-    let entries = queries::get_heatmap_data(conn).map_err(|e| {
+    query_heatmap_stats_filtered(conn, &crate::db::categories::CategoryFilter::All)
+}
+
+fn query_heatmap_stats_filtered(conn: &rusqlite::Connection, filter: &crate::db::categories::CategoryFilter) -> Result<HeatmapStats, String> {
+    let entries = queries::get_heatmap_data_filtered(conn, filter).map_err(|e| {
         log::error!("[stats] failed to query heatmap data: {e}");
         e.to_string()
     })?;
-    let raw = queries::get_all_time_stats(conn).map_err(|e| {
+    let raw = queries::get_all_time_stats_filtered(conn, filter).map_err(|e| {
         log::error!("[stats] failed to query all-time stats: {e}");
         e.to_string()
     })?;
-    let streak = queries::get_streak(conn).map_err(|e| {
+    let streak = queries::get_streak_filtered(conn, filter).map_err(|e| {
         log::error!("[stats] failed to query streak for heatmap: {e}");
         e.to_string()
     })?;
@@ -499,6 +528,15 @@ pub async fn mini_set_top(
 ) -> Result<(), String> {
     require_mini(&window)?;
     crate::mini::set_top(app, token, value).await
+}
+
+#[tauri::command]
+pub async fn mini_drag(app:AppHandle,window:tauri::WebviewWindow,token:u64)->Result<(),String> {
+    require_mini(&window)?;crate::mini::drag(app,token).await
+}
+#[tauri::command]
+pub async fn mini_set_behavior(app:AppHandle,window:tauri::WebviewWindow,token:u64,key:String,value:bool)->Result<crate::mini::MiniInfo,String> {
+    require_mini(&window)?;crate::mini::set_behavior(app,token,key,value).await
 }
 
 #[tauri::command]

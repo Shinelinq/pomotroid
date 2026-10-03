@@ -7,6 +7,7 @@
   let {
     timerSnapshot,
     smooth = false,
+    locked = false,
     busy = false,
     error = false,
     onToggle,
@@ -17,6 +18,7 @@
   }: {
     timerSnapshot: TimerState | null;
     smooth?: boolean;
+    locked?: boolean;
     busy?: boolean;
     error?: boolean;
     onToggle: () => void;
@@ -67,9 +69,10 @@
 <div
   class="mini"
   class:engaged
+  class:locked
   role="group"
   aria-label={m.mini_title()}
-  use:miniPointer={{ drag: onDrag, restore: onRestore, menu: onMenu }}
+  use:miniPointer={{ locked: () => locked, drag: onDrag, restore: onRestore, menu: onMenu }}
   onpointerenter={() => (hovered = true)}
   onpointerleave={() => {
     hovered = false;
@@ -190,6 +193,10 @@
     box-shadow: inset 0 0 0 1px var(--color-separator);
     overflow: hidden;
     touch-action: none;
+    cursor: grab;
+  }
+  .mini.locked {
+    cursor: default;
   }
   .ring {
     position: absolute;

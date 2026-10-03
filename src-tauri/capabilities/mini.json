@@ -6,9 +6,14 @@
   "permissions": [
     "core:event:allow-listen",
     "core:event:allow-unlisten",
-    "core:window:allow-start-dragging",
     "core:menu:allow-new",
     "core:menu:allow-popup",
+    "core:menu:allow-set-checked",
+    "core:menu:allow-set-enabled",
+    "core:menu:allow-set-text",
+    "core:menu:allow-append",
+    "core:menu:allow-insert",
+    "core:menu:allow-remove",
     "core:resources:allow-close",
     "log:allow-log"
   ]

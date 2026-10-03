@@ -198,6 +198,21 @@
       onclick={() => toggle('tray_icon_enabled', $settings.tray_icon_enabled)}
     />
 
+    <div class="row tray-mode">
+      <label for="tray-display-mode">{m.tray_mode()}</label>
+      <select
+        id="tray-display-mode"
+        value={$settings.tray_display_mode}
+        onchange={async (event) =>
+          settings.set(await setSetting('tray_display_mode', event.currentTarget.value))}
+      >
+        <option value="progress">{m.tray_progress()}</option>
+        <option value="minutes">{m.tray_minutes()}</option>
+      </select>
+    </div>
+    {#if !$settings.tray_icon_enabled && !$settings.min_to_tray}<p class="tray-note">
+        {m.tray_disabled_note()}
+      </p>{/if}
     {#if $settings.tray_icon_enabled}
       <!-- Minimize to Tray is Windows/Linux only: the macOS yellow traffic-light
            button routes to the Dock and cannot be intercepted by the app. -->
@@ -272,6 +287,30 @@
 </div>
 
 <style>
+  .tray-mode {
+    gap: 8px;
+    font-size: 12px;
+  }
+  .tray-mode select {
+    max-width: 60%;
+    height: 30px;
+    padding: 0 6px;
+    border: 1px solid var(--color-separator);
+    border-radius: 4px;
+    background: var(--color-background);
+    color: var(--color-foreground);
+    font-size: 12px;
+  }
+  .tray-mode select:focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+  }
+  .tray-note {
+    padding: 4px 20px;
+    font-size: 11px;
+    color: var(--color-foreground-darker);
+  }
+
   .section {
     display: flex;
     flex-direction: column;

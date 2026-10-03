@@ -1,18 +1,10 @@
 <script lang="ts">
-  // Orchestrator component. Subscribes to timer events, owns keyboard listener,
+  // Orchestrator component. Subscribes to authoritative timer state,
   // and renders TimerDial + TimerDisplay + TimerFooter.
   import { onMount } from 'svelte';
-  import {
-    timerToggle,
-    timerRestartRound,
-    timerSkip,
-    getTimerState,
-    onTimerTick,
-    onTimerPaused,
-    onTimerResumed,
-    onRoundChange,
-    onTimerReset,
-  } from '$lib/ipc';
+  import { timerToggle, timerRestartRound, timerSkip, onRoundChange } from '$lib/ipc';
+  import { connectPlans } from '$lib/plans/state';
+  import RoundStatus from './plans/RoundStatus.svelte';
   import { timerState } from '$lib/stores/timer';
   import { settings } from '$lib/stores/settings';
   import { fade } from 'svelte/transition';
@@ -47,74 +39,43 @@
   }
 
   onMount(() => {
-    const cleanups: UnlistenFn[] = [];
-
-    // Async setup: hydrate state and register event listeners.
-    (async () => {
-      const initial = await getTimerState();
-      timerState.set(initial);
-
-      cleanups.push(
-        await onTimerTick(({ elapsed_secs, total_secs }) => {
-          timerState.update((s) => ({
-            ...s,
-            elapsed_secs,
-            total_secs,
-            is_running: true,
-            is_paused: false,
-          }));
-        }),
-        await onTimerPaused(({ elapsed_secs }) => {
-          timerState.update((s) => ({
-            ...s,
-            elapsed_secs,
-            is_running: false,
-            is_paused: true,
-          }));
-        }),
-        await onTimerResumed(({ elapsed_secs }) => {
-          timerState.update((s) => ({
-            ...s,
-            elapsed_secs,
-            is_running: true,
-            is_paused: false,
-          }));
-        }),
-        await onRoundChange((snap) => {
-          timerState.set(snap);
-          if ($settings.notifications_enabled) {
-            let title: string;
-            let body: string;
-            if (snap.round_type === 'work') {
-              const afterBreak =
-                snap.previous_round_type === 'short-break' ||
-                snap.previous_round_type === 'long-break';
-              title = afterBreak ? m.notification_work_title() : m.notification_work_start_title();
-              body = afterBreak ? m.notification_work_body() : m.notification_work_start_body();
-            } else if (snap.round_type === 'short-break') {
-              title = m.notification_short_break_title();
-              body = m.notification_short_break_body();
-            } else {
-              title = m.notification_long_break_title();
-              body = m.notification_long_break_body();
-            }
-            notificationShow(title, body).catch(() => {});
-          }
-        }),
-        await onTimerReset((snap) => {
-          timerState.set(snap);
-        })
-      );
-    })();
-
+    const connection = connectPlans();
+    let disposed = false;
+    let stop: UnlistenFn | undefined;
+    onRoundChange((snap) => {
+      if (disposed || !$settings.notifications_enabled) return;
+      let title: string;
+      let body: string;
+      if (snap.stopped_after_round) {
+        title = m.round_stopped_title();
+        body = m.round_stopped_body();
+      } else if (snap.round_type === 'work') {
+        const afterBreak =
+          snap.previous_round_type === 'short-break' || snap.previous_round_type === 'long-break';
+        title = afterBreak ? m.notification_work_title() : m.notification_work_start_title();
+        body = afterBreak ? m.notification_work_body() : m.notification_work_start_body();
+      } else if (snap.round_type === 'short-break') {
+        title = m.notification_short_break_title();
+        body = m.notification_short_break_body();
+      } else {
+        title = m.notification_long_break_title();
+        body = m.notification_long_break_body();
+      }
+      void notificationShow(title, body).catch(() => {});
+    }).then((unlisten) => {
+      if (disposed) unlisten();
+      else stop = unlisten;
+    });
     return () => {
-      for (const unlisten of cleanups) unlisten();
+      disposed = true;
+      connection.dispose();
+      stop?.();
     };
   });
 </script>
 
 <div class="timer-outer" class:compact={isCompact}>
-  <div class="timer" style="zoom: {uiScale}">
+  <div class="timer" style="--dial-size: {220 * uiScale}px">
     <!-- Dial + display stacked (display centered over dial) -->
     <div class="dial-stack">
       <TimerDial snap={state} countdown={$settings.dial_countdown} />
@@ -128,6 +89,7 @@
         {roundLabel(state.round_type)}
       </div>
 
+      <RoundStatus />
       <div class="controls-wrapper">
         <!-- Back: restart current round -->
         <Tooltip text={m.tooltip_restart_round()}>
@@ -187,13 +149,15 @@
     flex-direction: column;
     align-items: center;
     gap: 8px;
+    width: 100%;
   }
 
   .timer {
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 16px;
+    gap: 8px;
+    max-width: 100%;
   }
 
   .dial-stack {
@@ -270,6 +234,6 @@
     letter-spacing: 0.08em;
     text-transform: uppercase;
     /* Collapse the gap above: the flex gap already provides spacing from the dial. */
-    margin-top: -8px;
+    margin-top: 0;
   }
 </style>

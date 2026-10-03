@@ -1,14 +1,19 @@
 /** Only non-control regions drag; CSS pixels are logical pixels at every Windows DPI. */
 export function miniPointer(
   node: HTMLElement,
-  actions: { drag: () => Promise<void>; restore: () => void; menu: () => void }
+  actions: {
+    locked?: () => boolean;
+    drag: () => Promise<void>;
+    restore: () => void;
+    menu: () => void;
+  }
 ) {
   let origin: { x: number; y: number; id: number } | null = null;
   let suppressUntil = 0;
   const control = (target: EventTarget | null) =>
     target instanceof Element && !!target.closest('button');
   function down(event: PointerEvent) {
-    if (event.button !== 0 || control(event.target)) return;
+    if (actions.locked?.() || event.button !== 0 || control(event.target)) return;
     origin = { x: event.clientX, y: event.clientY, id: event.pointerId };
     node.setPointerCapture(event.pointerId);
   }
@@ -18,7 +23,7 @@ export function miniPointer(
     if (previous && node.hasPointerCapture(previous.id)) node.releasePointerCapture(previous.id);
   }
   function move(event: PointerEvent) {
-    if (event.buttons !== 1) {
+    if (actions.locked?.() || event.buttons !== 1) {
       cancel();
       return;
     }

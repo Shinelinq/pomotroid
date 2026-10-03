@@ -46,11 +46,18 @@ export interface LocalShortcutState {
  */
 export function createLocalShortcutHandler(state: LocalShortcutState): (e: KeyboardEvent) => void {
   return function handleKeydown(e: KeyboardEvent) {
-    // Skip if a text input / shortcut capture field is focused.
+    if (e.defaultPrevented) return;
+    // Native controls and menus own their keyboard activation/navigation.
     const target = e.target as HTMLElement | null;
     if (target) {
       const tag = target.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || target.isContentEditable) return;
+      if (
+        tag === 'INPUT' ||
+        tag === 'TEXTAREA' ||
+        target.isContentEditable ||
+        target.closest('button, select, [role="menu"], dialog')
+      )
+        return;
     }
 
     // Skip bare modifier keys.

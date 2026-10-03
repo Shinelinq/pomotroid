@@ -149,3 +149,103 @@ test('snapshot errors are reported rather than synthesizing countdown state', as
   await assert.rejects(sync.ready, /snapshot failed/);
   assert.equal(f.removed.length, 5);
 });
+
+test('full backend snapshots synchronize stopped, pending and zero-second paused rounds without a frontend clock', async () => {
+  const listeners = {};
+  let resolveRead;
+  const initial = new Promise((resolve) => {
+    resolveRead = resolve;
+  });
+  const updates = [];
+  let reads = 0;
+  const full = { ...base, round_id: 7, revision: 1, has_started: true, stop_after_round: false };
+  const api = {
+    getTimerState: () =>
+      ++reads === 1
+        ? initial
+        : Promise.resolve({
+            ...full,
+            revision: 3,
+            is_running: false,
+            is_paused: true,
+            elapsed_secs: 0,
+            stop_after_round: true,
+          }),
+    onTimerState: async (callback) => {
+      listeners.state = callback;
+      return () => {};
+    },
+  };
+  const sync = syncMiniTimer(api, (state) => updates.push(state));
+  await turn();
+  listeners.state({
+    ...full,
+    revision: 3,
+    is_running: false,
+    is_paused: true,
+    elapsed_secs: 0,
+    stop_after_round: true,
+  });
+  resolveRead(full);
+  await sync.ready;
+  assert.equal(updates.at(-1).revision, 3);
+  assert.equal(updates.at(-1).stop_after_round, true);
+  assert.equal(updates.at(-1).is_paused, true);
+  listeners.state({
+    ...full,
+    round_id: 8,
+    revision: 4,
+    stop_after_round: false,
+    has_started: false,
+    is_running: false,
+  });
+  assert.equal(updates.at(-1).round_id, 8);
+  assert.equal(updates.at(-1).has_started, false);
+  listeners.state(full);
+  assert.equal(updates.at(-1).round_id, 8);
+  sync.dispose();
+});
+
+test('main and mini consume the same locked/next category snapshot without starting another timer', async () => {
+  let receive;
+  const main = {
+    ...base,
+    revision: 20,
+    round_id: 9,
+    category_id: 1,
+    next_category_id: 2,
+    category_pending: true,
+    category_notice_id: null,
+  };
+  let view;
+  const sync = syncMiniTimer(
+    {
+      getTimerState: async () => main,
+      onTimerState: async (callback) => {
+        receive = callback;
+        return () => {};
+      },
+    },
+    (state) => {
+      view = state;
+    }
+  );
+  await sync.ready;
+  assert.deepEqual(view, main);
+  receive({ ...main, revision: 21, next_category_id: null, category_notice_id: 2 });
+  assert.equal(view.category_id, 1);
+  assert.equal(view.next_category_id, null);
+  assert.equal(miniDisplay(view).remaining, miniDisplay(main).remaining);
+  receive({
+    ...main,
+    revision: 22,
+    round_id: 10,
+    round_type: 'short-break',
+    category_id: null,
+    next_category_id: null,
+    category_pending: false,
+  });
+  assert.equal(view.category_id, null);
+  assert.equal(view.round_id, 10);
+  sync.dispose();
+});

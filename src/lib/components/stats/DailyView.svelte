@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
+  import type { ChartSelection, DetailEntry } from './sessionDetails';
   import type { DailyStats } from '$lib/types';
   import * as m from '$paraglide/messages.js';
   import { getLocale } from '$paraglide/runtime.js';
@@ -10,12 +12,26 @@
   import { measurePlot } from './measurePlot';
   import { chartScale, formatDuration, localDate, hourRange } from './stats';
 
-  let { today, date }: { today: DailyStats; date: string } = $props();
-  const interaction = createChartInteraction();
+  let {
+    today,
+    date,
+    initialSelection,
+    onopen,
+  }: {
+    today: DailyStats;
+    date: string;
+    initialSelection?: ChartSelection | null;
+    onopen?: (entry: DetailEntry) => void;
+  } = $props();
+  const interaction = createChartInteraction(untrack(() => initialSelection?.pinned ?? null));
   const tooltipId = 'daily-hour-tooltip';
   let chart = $state<SVGSVGElement>();
   let plot = $state({ width: 0, height: 190 });
-  let focusedHour = $state(new Date().getHours());
+  let focusedHour = $state(
+    untrack(() =>
+      initialSelection?.focused == null ? new Date().getHours() : Number(initialSelection.focused)
+    )
+  );
   const number = $derived(new Intl.NumberFormat(getLocale()));
   const fullDate = $derived(new Intl.DateTimeFormat(getLocale(), { dateStyle: 'full' }));
   const shortDate = $derived(
@@ -49,11 +65,18 @@
     ...values(hour),
     m.stats_start_hour_help(),
   ];
+  let previousRange: string | undefined;
   $effect(() => {
-    date;
-    interaction.clear();
-    focusedHour = new Date().getHours();
+    const range = date;
+    if (previousRange !== undefined && previousRange !== range) {
+      interaction.clear();
+      focusedHour = new Date().getHours();
+    }
+    previousRange = range;
   });
+  export function selection(): ChartSelection {
+    return { pinned: interaction.pinned, focused: String(focusedHour) };
+  }
   function show(event: PointerEvent | FocusEvent, hour: number, immediate = false) {
     interaction.show(String(hour), event.currentTarget as Element, immediate);
   }
@@ -102,7 +125,15 @@
         <h2>{m.stats_hourly_rounds()}</h2>
         <StatsHelp label={m.stats_hourly_rounds()} text={m.stats_start_hour_help()} />
       </div>
-      <span>{shortDate.format(localDate(date))}</span>
+      <div class="day-navigation">
+        <span>{shortDate.format(localDate(date))}</span>
+        {#if onopen}<button
+            class="record-entry"
+            data-detail-entry="today-day"
+            onclick={() => onopen?.({ date, hour: null, focusKey: 'today-day' })}
+            >{m.detail_open_day()}</button
+          >{/if}
+      </div>
     </div>
     <div class="plot" use:measurePlot={(size) => (plot = size)}>
       <svg
@@ -190,6 +221,13 @@
       hint={m.stats_hour_detail_hint()}
       clearLabel={m.stats_clear_hour()}
       onclear={interaction.unpin}
+      entryKey="today-hour"
+      entryLabel={m.detail_open_hour()}
+      onrecords={pinned && onopen
+        ? () => {
+            if (pinned) onopen?.({ date, hour: pinned.hour, focusKey: 'today-hour' });
+          }
+        : undefined}
     />
   </div>
   {#if interaction.preview && preview}<StatsTooltip
@@ -227,6 +265,32 @@
     gap: 8px 16px;
     color: var(--color-foreground-darker);
     font-size: 0.72rem;
+  }
+  .day-navigation {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 4px 8px;
+  }
+  .record-entry {
+    min-height: 28px;
+    padding: 4px 6px;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--color-foreground-darker);
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .record-entry:hover {
+    color: var(--color-foreground);
+    background: var(--color-hover);
+  }
+  .record-entry:focus-visible {
+    outline: 1px solid var(--color-foreground);
+    outline-offset: 1px;
   }
   .chart-title {
     display: flex;

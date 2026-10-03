@@ -17,6 +17,7 @@ pub struct Settings {
     pub auto_start_work: bool,
     pub auto_start_break: bool,
     pub tray_icon_enabled: bool,
+    pub tray_display_mode: String,
     pub min_to_tray: bool,
     pub min_to_tray_on_close: bool,
     pub notifications_enabled: bool,
@@ -75,6 +76,7 @@ impl Default for Settings {
             auto_start_work: true,
             auto_start_break: true,
             tray_icon_enabled: false,
+            tray_display_mode: "progress".into(),
             min_to_tray: false,
             min_to_tray_on_close: false,
             notifications_enabled: false,
@@ -184,6 +186,7 @@ pub fn load(conn: &Connection) -> Result<Settings> {
         auto_start_work: parse_bool(&map, "auto_start_work", d.auto_start_work),
         auto_start_break: parse_bool(&map, "auto_start_break", d.auto_start_break),
         tray_icon_enabled: parse_bool(&map, "tray_icon_enabled", d.tray_icon_enabled),
+        tray_display_mode: map.get("tray_display_mode").filter(|v| matches!(v.as_str(), "progress" | "minutes")).cloned().unwrap_or(d.tray_display_mode),
         min_to_tray: parse_bool(&map, "min_to_tray", d.min_to_tray),
         min_to_tray_on_close: parse_bool(&map, "min_to_tray_on_close", d.min_to_tray_on_close),
         notifications_enabled: parse_bool(&map, "notifications", d.notifications_enabled),
@@ -432,7 +435,9 @@ mod tests {
         conn.execute("INSERT INTO settings (key, value) VALUES ('time_short_break_mins', '7')", []).unwrap();
         conn.execute("INSERT INTO settings (key, value) VALUES ('time_long_break_mins', '20')", []).unwrap();
 
-        // Now run the full migration suite — only MIGRATION_2 should fire.
+        // Run later migrations too; the legacy duration conversion must be preserved.
+        // Version 1 included sessions; later additive migrations require that real schema.
+        conn.execute_batch("CREATE TABLE sessions(id INTEGER PRIMARY KEY AUTOINCREMENT, started_at INTEGER NOT NULL, ended_at INTEGER, round_type TEXT NOT NULL, duration_secs INTEGER NOT NULL, completed INTEGER NOT NULL DEFAULT 0);").unwrap();
         crate::db::migrations::run(&conn).unwrap();
 
         // New keys must exist with correct second values.

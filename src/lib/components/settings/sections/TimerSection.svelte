@@ -1,6 +1,11 @@
 <script lang="ts">
   import { settings } from '$lib/stores/settings';
   import { setSetting } from '$lib/ipc';
+  import { actOnPlan, plans } from '$lib/plans/state';
+  import { planError } from '$lib/plans/format';
+  import PlanManager from '$lib/components/plans/PlanManager.svelte';
+  let error = $state('');
+  const config = $derived($plans?.book.working ?? $settings);
   import SettingsToggle from '$lib/components/settings/SettingsToggle.svelte';
   import * as m from '$paraglide/messages.js';
 
@@ -9,10 +14,10 @@
   const MAX_ROUNDS = 12;
 
   // Slider positions (whole minutes) derived from stored seconds.
-  let workMins = $derived(Math.round($settings.time_work_secs / 60));
-  let shortMins = $derived(Math.round($settings.time_short_break_secs / 60));
-  let longMins = $derived(Math.round($settings.time_long_break_secs / 60));
-  let rounds = $derived($settings.long_break_interval);
+  let workMins = $derived(Math.round(config.time_work_secs / 60));
+  let shortMins = $derived(Math.round(config.time_short_break_secs / 60));
+  let longMins = $derived(Math.round(config.time_long_break_secs / 60));
+  let rounds = $derived(config.long_break_interval);
 
   // Per-row edit state: the raw text the user is currently typing.
   let workEdit = $state<string | null>(null);
@@ -49,13 +54,23 @@
   }
 
   async function handleChange(dbKey: string, rawValue: number) {
-    const updated = await setSetting(dbKey, String(rawValue));
-    settings.set(updated);
+    error = '';
+    try {
+      await actOnPlan({ kind: 'edit', key: dbKey, value: String(rawValue) });
+    } catch (e) {
+      error = planError(e);
+    }
   }
 
   async function toggle(dbKey: string, current: boolean) {
-    const updated = await setSetting(dbKey, current ? 'false' : 'true');
-    settings.set(updated);
+    error = '';
+    try {
+      if (dbKey === 'dial_countdown')
+        settings.set(await setSetting(dbKey, current ? 'false' : 'true'));
+      else await actOnPlan({ kind: 'edit', key: dbKey, value: current ? 'false' : 'true' });
+    } catch (e) {
+      error = planError(e);
+    }
   }
 
   /** Commit an edited badge value: parse, clamp, save. Reverts on invalid input. */
@@ -80,6 +95,8 @@
   }
 </script>
 
+<PlanManager />
+{#if error}<p class="config-error" role="alert">{error}</p>{/if}
 <div class="section">
   <!-- Focus -->
   <div class="slider-row">
@@ -88,7 +105,7 @@
       <input
         class="slider-value"
         type="text"
-        value={workEdit ?? formatMMSS($settings.time_work_secs)}
+        value={workEdit ?? formatMMSS(config.time_work_secs)}
         onfocus={(e) => {
           workEdit = (e.target as HTMLInputElement).value;
           (e.target as HTMLInputElement).select();
@@ -99,7 +116,7 @@
         onblur={async (e) => {
           await commitBadge(
             workEdit,
-            $settings.time_work_secs,
+            config.time_work_secs,
             'time_work_secs',
             e.target as HTMLInputElement
           );
@@ -109,7 +126,7 @@
           if (e.key === 'Enter') {
             await commitBadge(
               workEdit,
-              $settings.time_work_secs,
+              config.time_work_secs,
               'time_work_secs',
               e.target as HTMLInputElement
             );
@@ -117,7 +134,7 @@
             (e.target as HTMLInputElement).blur();
           } else if (e.key === 'Escape') {
             workEdit = null;
-            (e.target as HTMLInputElement).value = formatMMSS($settings.time_work_secs);
+            (e.target as HTMLInputElement).value = formatMMSS(config.time_work_secs);
             (e.target as HTMLInputElement).blur();
           }
         }}
@@ -142,17 +159,17 @@
   <SettingsToggle
     label={m.timer_toggle_short_breaks()}
     description={m.timer_toggle_short_breaks_desc()}
-    checked={!$settings.short_breaks_enabled}
-    onclick={() => toggle('short_breaks_enabled', $settings.short_breaks_enabled)}
+    checked={!config.short_breaks_enabled}
+    onclick={() => toggle('short_breaks_enabled', config.short_breaks_enabled)}
   />
-  <div class="break-body" class:disabled={!$settings.short_breaks_enabled}>
+  <div class="break-body" class:disabled={!config.short_breaks_enabled}>
     <div class="slider-row">
       <div class="slider-meta">
         <span class="slider-label">{m.timer_slider_short_break()}</span>
         <input
           class="slider-value"
           type="text"
-          value={shortEdit ?? formatMMSS($settings.time_short_break_secs)}
+          value={shortEdit ?? formatMMSS(config.time_short_break_secs)}
           onfocus={(e) => {
             shortEdit = (e.target as HTMLInputElement).value;
             (e.target as HTMLInputElement).select();
@@ -163,7 +180,7 @@
           onblur={async (e) => {
             await commitBadge(
               shortEdit,
-              $settings.time_short_break_secs,
+              config.time_short_break_secs,
               'time_short_break_secs',
               e.target as HTMLInputElement
             );
@@ -173,7 +190,7 @@
             if (e.key === 'Enter') {
               await commitBadge(
                 shortEdit,
-                $settings.time_short_break_secs,
+                config.time_short_break_secs,
                 'time_short_break_secs',
                 e.target as HTMLInputElement
               );
@@ -181,7 +198,7 @@
               (e.target as HTMLInputElement).blur();
             } else if (e.key === 'Escape') {
               shortEdit = null;
-              (e.target as HTMLInputElement).value = formatMMSS($settings.time_short_break_secs);
+              (e.target as HTMLInputElement).value = formatMMSS(config.time_short_break_secs);
               (e.target as HTMLInputElement).blur();
             }
           }}
@@ -210,17 +227,17 @@
   <SettingsToggle
     label={m.timer_toggle_long_breaks()}
     description={m.timer_toggle_long_breaks_desc()}
-    checked={!$settings.long_breaks_enabled}
-    onclick={() => toggle('long_breaks_enabled', $settings.long_breaks_enabled)}
+    checked={!config.long_breaks_enabled}
+    onclick={() => toggle('long_breaks_enabled', config.long_breaks_enabled)}
   />
-  <div class="break-body" class:disabled={!$settings.long_breaks_enabled}>
+  <div class="break-body" class:disabled={!config.long_breaks_enabled}>
     <div class="slider-row">
       <div class="slider-meta">
         <span class="slider-label">{m.timer_slider_long_break()}</span>
         <input
           class="slider-value"
           type="text"
-          value={longEdit ?? formatMMSS($settings.time_long_break_secs)}
+          value={longEdit ?? formatMMSS(config.time_long_break_secs)}
           onfocus={(e) => {
             longEdit = (e.target as HTMLInputElement).value;
             (e.target as HTMLInputElement).select();
@@ -231,7 +248,7 @@
           onblur={async (e) => {
             await commitBadge(
               longEdit,
-              $settings.time_long_break_secs,
+              config.time_long_break_secs,
               'time_long_break_secs',
               e.target as HTMLInputElement
             );
@@ -241,7 +258,7 @@
             if (e.key === 'Enter') {
               await commitBadge(
                 longEdit,
-                $settings.time_long_break_secs,
+                config.time_long_break_secs,
                 'time_long_break_secs',
                 e.target as HTMLInputElement
               );
@@ -249,7 +266,7 @@
               (e.target as HTMLInputElement).blur();
             } else if (e.key === 'Escape') {
               longEdit = null;
-              (e.target as HTMLInputElement).value = formatMMSS($settings.time_long_break_secs);
+              (e.target as HTMLInputElement).value = formatMMSS(config.time_long_break_secs);
               (e.target as HTMLInputElement).blur();
             }
           }}
@@ -294,14 +311,14 @@
   <SettingsToggle
     label={m.timer_toggle_auto_start_work()}
     description={m.timer_toggle_auto_start_work_desc()}
-    checked={$settings.auto_start_work}
-    onclick={() => toggle('auto_start_work', $settings.auto_start_work)}
+    checked={config.auto_start_work}
+    onclick={() => toggle('auto_start_work', config.auto_start_work)}
   />
   <SettingsToggle
     label={m.timer_toggle_auto_start_break()}
     description={m.timer_toggle_auto_start_break_desc()}
-    checked={$settings.auto_start_break}
-    onclick={() => toggle('auto_start_break', $settings.auto_start_break)}
+    checked={config.auto_start_break}
+    onclick={() => toggle('auto_start_break', config.auto_start_break)}
   />
   <SettingsToggle
     label={m.timer_toggle_countdown()}
@@ -312,6 +329,11 @@
 </div>
 
 <style>
+  .config-error {
+    padding: 6px 20px;
+    font-size: 11px;
+    color: var(--color-foreground-darker);
+  }
   .section {
     display: flex;
     flex-direction: column;

@@ -29,12 +29,14 @@ use commands::{
     settings_get, settings_reset_defaults, settings_set,
     shortcuts_reload,
     sessions_clear,
-    stats_get_detailed, stats_get_heatmap,
+    stats_get_detailed, stats_get_heatmap, stats_get_sessions,
     themes_list,
+    categories_get, categories_action, categories_manage, categories_take_focus,
+    timer_plans_get, timer_plans_action, timer_plans_manage, timer_plans_take_focus,
     timer_get_state, timer_reset, timer_restart_round, timer_skip, timer_toggle,
     window_set_visibility,
     mini_open, mini_info, mini_ready, mini_failed, mini_restore, mini_hide_to_tray,
-    mini_set_top, mini_save_position, mini_exit,
+    mini_set_top, mini_save_position, mini_exit, mini_drag, mini_set_behavior,
     aux_window_open, aux_window_ready,
 };
 
@@ -330,6 +332,7 @@ pub fn run() {
             let win_for_pos = main_window.clone();
             main_window.on_window_event(move |event| {
                 match event {
+                    tauri::WindowEvent::ThemeChanged(_) | tauri::WindowEvent::ScaleFactorChanged { .. } => tray::refresh(&app_for_close),
                     tauri::WindowEvent::CloseRequested { api, .. } => {
                         let hide = db_for_close
                             .lock()
@@ -381,6 +384,8 @@ pub fn run() {
             timer_restart_round,
             timer_skip,
             timer_get_state,
+            timer_plans_get, timer_plans_action, timer_plans_manage, timer_plans_take_focus,
+            categories_get, categories_action, categories_manage, categories_take_focus,
             // Settings
             settings_get,
             settings_set,
@@ -392,10 +397,11 @@ pub fn run() {
             // Stats
             stats_get_detailed,
             stats_get_heatmap,
+            stats_get_sessions,
             // Window
             window_set_visibility,
             mini_open, mini_info, mini_ready, mini_failed, mini_restore, mini_hide_to_tray,
-            mini_set_top, mini_save_position, mini_exit,
+            mini_set_top, mini_save_position, mini_exit, mini_drag, mini_set_behavior,
             aux_window_open, aux_window_ready,
             // Shortcuts
             shortcuts_reload,

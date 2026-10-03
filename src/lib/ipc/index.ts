@@ -6,6 +6,13 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { open as dialogOpen } from '@tauri-apps/plugin-dialog';
 import type {
   TimerState,
+  SessionQuery,
+  SessionPage,
+  CategoryState,
+  CategoryAction,
+  CategoryFilter,
+  PlanState,
+  PlanAction,
   Settings,
   Theme,
   CustomAudioInfo,
@@ -46,10 +53,12 @@ export const notificationShow = (title: string, body: string) =>
 export const setWindowVisibility = (visible: boolean) =>
   invoke<void>('window_set_visibility', { visible });
 
-export const openAuxiliaryWindow = (kind: 'settings' | 'stats') => invoke<void>('aux_window_open', { kind });
-export const auxiliaryWindowReady = () => invoke<void>('aux_window_ready', {
-  token: Number(new URLSearchParams(window.location.search).get('aux') ?? 0),
-});
+export const openAuxiliaryWindow = (kind: 'settings' | 'stats') =>
+  invoke<void>('aux_window_open', { kind });
+export const auxiliaryWindowReady = () =>
+  invoke<void>('aux_window_ready', {
+    token: Number(new URLSearchParams(window.location.search).get('aux') ?? 0),
+  });
 
 export const openMini = () => invoke<void>('mini_open');
 export const getMiniInfo = (token: number) => invoke<MiniInfo>('mini_info', { token });
@@ -100,10 +109,12 @@ export const clearSessionHistory = () => invoke<void>('sessions_clear');
 // --- Stats commands ---
 
 /** Daily + weekly data + streak in one call (Today and This Week tabs). */
-export const statsGetDetailed = () => invoke<DetailedStats>('stats_get_detailed');
+export const statsGetDetailed = (filter?: CategoryFilter) =>
+  invoke<DetailedStats>('stats_get_detailed', { filter });
 
 /** Heatmap entries + lifetime totals (All Time tab). */
-export const statsGetHeatmap = () => invoke<HeatmapStats>('stats_get_heatmap');
+export const statsGetHeatmap = (filter?: CategoryFilter) =>
+  invoke<HeatmapStats>('stats_get_heatmap', { filter });
 
 // --- Platform commands ---
 
@@ -151,3 +162,39 @@ export const onThemesChanged = (cb: (themes: Theme[]) => void): Promise<Unlisten
 
 export const onSessionsCleared = (cb: () => void): Promise<UnlistenFn> =>
   listen<void>('sessions:cleared', () => cb());
+
+// Timer plans and round controls share the backend's authoritative snapshots.
+export const getTimerPlans = () => invoke<PlanState>('timer_plans_get');
+export const timerPlanAction = (action: PlanAction) =>
+  invoke<PlanState>('timer_plans_action', { action });
+export const manageTimerPlans = () => invoke<void>('timer_plans_manage');
+export const takeTimerPlansFocus = () => invoke<boolean>('timer_plans_take_focus');
+export const onTimerPlansFocus = (cb: () => void): Promise<UnlistenFn> =>
+  listen<void>('plans:focus', cb);
+export const onTimerState = (cb: (state: TimerState) => void): Promise<UnlistenFn> =>
+  listen<TimerState>('timer:state', (e) => cb(e.payload));
+export const onTimerPlansChanged = (cb: (state: PlanState) => void): Promise<UnlistenFn> =>
+  listen<PlanState>('plans:changed', (e) => cb(e.payload));
+
+// Classification has its own events; it never reconfigures timer settings.
+export const getCategories = () => invoke<CategoryState>('categories_get');
+export const categoryAction = (action: CategoryAction) =>
+  invoke<CategoryState>('categories_action', { action });
+export const manageCategories = () => invoke<void>('categories_manage');
+export const takeCategoriesFocus = () => invoke<boolean>('categories_take_focus');
+export const onCategoriesFocus = (cb: () => void): Promise<UnlistenFn> =>
+  listen<void>('categories:focus', cb);
+export const onCategoriesChanged = (cb: (state: CategoryState) => void): Promise<UnlistenFn> =>
+  listen<CategoryState>('categories:changed', (e) => cb(e.payload));
+
+export const statsGetSessions = (query: SessionQuery) =>
+  invoke<SessionPage>('stats_get_sessions', { query });
+
+export const dragMini = (token: number) => invoke<void>('mini_drag', { token });
+export const setMiniBehavior = (token: number, key: 'snap' | 'locked', value: boolean) =>
+  invoke<MiniInfo>('mini_set_behavior', { token, key, value });
+export const onMiniPreferences = (cb: (value: MiniInfo) => void): Promise<UnlistenFn> =>
+  listen<MiniInfo>('mini:preferences', (e) => cb(e.payload));
+
+export const onMiniStatus = (handler: (lines: string[]) => void) =>
+  listen<string[]>('mini:status', (event) => handler(event.payload));

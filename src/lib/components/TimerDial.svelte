@@ -73,8 +73,8 @@
 
 <style>
   .dial {
-    width: 220px;
-    height: 220px;
+    width: var(--dial-size, 220px);
+    height: var(--dial-size, 220px);
     display: block;
   }
 </style>

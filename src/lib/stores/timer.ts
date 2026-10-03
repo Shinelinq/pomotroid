@@ -14,6 +14,17 @@ const initial: TimerState = {
   work_round_number: 1,
   work_rounds_total: 4,
   session_work_count: 1,
+  round_id: 0,
+  revision: -1,
+  captured_at_ms: 0,
+  has_started: false,
+  stop_after_round: false,
+  stopped_after_round: false,
+  category_id: null,
+  next_category_id: null,
+  category_pending: false,
+  category_notice_id: null,
+  session_id: null,
 };
 
 export const timerState = writable<TimerState>(initial);

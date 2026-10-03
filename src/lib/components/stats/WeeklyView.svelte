@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
+  import type { ChartSelection, DetailEntry } from './sessionDetails';
   import type { DayStat, StreakInfo } from '$lib/types';
   import * as m from '$paraglide/messages.js';
   import { getLocale } from '$paraglide/runtime.js';
@@ -24,19 +26,23 @@
     streak,
     today,
     loading = false,
+    initialSelection,
+    onopen,
     metric = $bindable<Metric>('time'),
   }: {
     week: DayStat[] | null;
     streak: StreakInfo | null;
     today: string;
     loading?: boolean;
+    initialSelection?: ChartSelection | null;
+    onopen?: (entry: DetailEntry) => void;
     metric?: Metric;
   } = $props();
-  const interaction = createChartInteraction();
+  const interaction = createChartInteraction(untrack(() => initialSelection?.pinned ?? null));
   const tooltipId = 'weekly-date-tooltip';
   let chart = $state<SVGSVGElement>();
   let plot = $state({ width: 0, height: 190 });
-  let focusedDate = $state<string | null>(null);
+  let focusedDate = $state<string | null>(untrack(() => initialSelection?.focused ?? null));
   const days = $derived(week === null ? null : buildWeek(week, today));
   const summary = $derived(days === null ? null : summarizeWeek(days));
   const dates = $derived(new Set((days ?? []).map((d) => d.date)));
@@ -76,11 +82,18 @@
     `${m.stats_completion()}: ${formatRate(day.rounds, day.started_rounds)}`,
   ];
 
+  let previousRange: string | undefined;
   $effect(() => {
-    today;
-    interaction.clear();
-    focusedDate = null;
+    const range = today;
+    if (previousRange !== undefined && previousRange !== range) {
+      interaction.clear();
+      focusedDate = null;
+    }
+    previousRange = range;
   });
+  export function selection(): ChartSelection {
+    return { pinned: interaction.pinned, focused: focusedDate };
+  }
   function show(event: PointerEvent | FocusEvent, day: DayStat, immediate = false) {
     const element = event.currentTarget as SVGGElement;
     interaction.show(day.date, element, immediate);
@@ -244,6 +257,12 @@
       date={pinned ? fullDate.format(localDate(pinned.date)) : null}
       lines={pinned ? details(pinned) : []}
       onclear={interaction.unpin}
+      entryKey="week-day"
+      onrecords={pinned && onopen
+        ? () => {
+            if (pinned) onopen?.({ date: pinned.date, focusKey: 'week-day' });
+          }
+        : undefined}
     />
   </div>
   {#if interaction.preview && preview}<StatsTooltip

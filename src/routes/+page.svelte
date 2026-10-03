@@ -2,6 +2,8 @@
   import '../app.css';
   import { onMount } from 'svelte';
   import Titlebar from '$lib/components/Titlebar.svelte';
+  import PlanPicker from '$lib/components/plans/PlanPicker.svelte';
+  import { popupPlanControls } from '$lib/plans/native';
   import Timer from '$lib/components/Timer.svelte';
   import { getSettings, getThemes, onSettingsChanged, onThemesChanged } from '$lib/ipc';
   import { settings } from '$lib/stores/settings';
@@ -21,14 +23,13 @@
   let isFullscreen = $state(false);
 
   // Base window dimensions (natural/default size).
-  const BASE_W = 360;
-  const BASE_H = 478;
   const TITLEBAR_H = 40;
 
   // Compact mode: when either dimension drops below this threshold,
   // hide non-essential elements (footer, label, play/pause) to show
   // only the timer dial — like an Apple Watch face.
   const COMPACT_THRESHOLD = 300;
+  const REGULAR_MIN_HEIGHT = 400; // Keep status text and controls at their natural size.
 
   let uiScale = $state(1.0);
   let isCompact = $state(false);
@@ -42,15 +43,15 @@
     function update() {
       const w = window.innerWidth;
       const h = window.innerHeight;
-      isCompact = w < COMPACT_THRESHOLD || h < COMPACT_THRESHOLD;
+      isCompact = w < COMPACT_THRESHOLD || h < REGULAR_MIN_HEIGHT;
       if (isCompact) {
         // Scale so the dial fills the available space, reserving
         // COMPACT_BOTTOM_PAD px for the intentional bottom whitespace.
         const available = Math.min(w - 16, h - TITLEBAR_H - 16 - COMPACT_BOTTOM_PAD);
         uiScale = Math.max(0.4, Math.min(available / 220, 4));
       } else {
-        // Scale proportionally to the base window dimensions.
-        uiScale = Math.max(0.5, Math.min(w / BASE_W, (h - TITLEBAR_H) / (BASE_H - TITLEBAR_H), 4));
+        // Reserve space for fixed-size text and controls; only the dial adapts.
+        uiScale = Math.max(0.35, Math.min((w - 32) / 220, (h - TITLEBAR_H - 28 - 190) / 220, 4));
       }
     }
     update();
@@ -179,8 +180,23 @@
   <div class="rh rh-sw" onmousedown={() => startResize('SouthWest')} role="none"></div>
 {/if}
 
+<svelte:window
+  oncontextmenu={(event) => {
+    if (isCompact) {
+      event.preventDefault();
+      void popupPlanControls();
+    }
+  }}
+  onkeydown={(event) => {
+    if (isCompact && (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10'))) {
+      event.preventDefault();
+      void popupPlanControls();
+    }
+  }}
+/>
 <div class="app">
   <Titlebar />
+  {#if !isCompact}<PlanPicker />{/if}
   <main class:compact={isCompact}>
     <Timer {isCompact} {uiScale} />
   </main>

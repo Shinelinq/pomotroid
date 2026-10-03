@@ -1,5 +1,7 @@
 mod lifecycle;
 mod position;
+#[cfg(target_os = "windows")]
+mod windows;
 
 use crate::{db::DbState, settings, tray::TrayState};
 use lifecycle::{CloseReason, Lifecycle, Phase};
@@ -20,6 +22,11 @@ pub struct MiniState {
     gate: tokio::sync::Mutex<()>,
     lifecycle: Mutex<Lifecycle>,
     position_pending: AtomicBool,
+    dragging: AtomicBool,
+    drag_entered: AtomicBool,
+    position_locked: AtomicBool,
+    native_ready: AtomicBool,
+    drag_done: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
 }
 
 impl Default for MiniState {
@@ -28,14 +35,22 @@ impl Default for MiniState {
             gate: tokio::sync::Mutex::new(()),
             lifecycle: Mutex::new(Lifecycle::default()),
             position_pending: AtomicBool::new(false),
+            dragging: AtomicBool::new(false),
+            drag_entered: AtomicBool::new(false),
+            position_locked: AtomicBool::new(false),
+            native_ready: AtomicBool::new(false),
+            drag_done: Mutex::new(None),
         }
     }
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct MiniInfo {
     pub always_on_top: bool,
     pub tray_available: bool,
+    pub snap_enabled: bool,
+    pub position_locked: bool,
+    pub menu_lines: Vec<String>,
 }
 
 fn err(error: impl std::fmt::Display) -> String {
@@ -96,7 +111,19 @@ pub fn info(app: &AppHandle, token: u64) -> Result<MiniInfo, String> {
     let (_, always_on_top) = preferences(&conn)?;
     Ok(MiniInfo {
         always_on_top,
+        menu_lines: app
+            .state::<std::sync::Arc<TrayState>>()
+            .runtime
+            .latest
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|(_, p)| p.mini_lines.clone())
+            .unwrap_or_default(),
         tray_available: tray_available(app),
+        snap_enabled: settings::get_setting(&conn, "mini_snap_enabled").as_deref() != Some("false"),
+        position_locked: settings::get_setting(&conn, "mini_position_locked").as_deref()
+            == Some("true"),
     })
 }
 
@@ -115,12 +142,11 @@ fn save_position(app: &AppHandle, window: &WebviewWindow) -> Result<(), String> 
     let pos = window.outer_position().map_err(err)?;
     let db = app.state::<DbState>();
     let conn = db.lock().map_err(err)?;
-    settings::save_setting(
-        &conn,
-        "mini_position",
-        &serde_json::to_string(&Point { x: pos.x, y: pos.y }).map_err(err)?,
-    )
-    .map_err(err)
+    let value = serde_json::to_string(&Point { x: pos.x, y: pos.y }).map_err(err)?;
+    if settings::get_setting(&conn, "mini_position").as_deref() != Some(value.as_str()) {
+        settings::save_setting(&conn, "mini_position", &value).map_err(err)?;
+    }
+    Ok(())
 }
 
 fn schedule_position(app: &AppHandle, token: u64) {
@@ -133,8 +159,11 @@ fn schedule_position(app: &AppHandle, token: u64) {
         tokio::time::sleep(Duration::from_millis(250)).await;
         let state = app.state::<MiniState>();
         let _gate = state.gate.lock().await;
-        if current(&app, token).is_ok() {
+        if current(&app, token).is_ok() && !state.dragging.load(Ordering::Acquire) {
             if let Some(window) = app.get_webview_window("mini") {
+                if let Err(error) = settle_window(&window, false) {
+                    log::warn!("[mini] visibility repair failed: {error}");
+                }
                 if let Err(error) = save_position(&app, &window) {
                     log::warn!("[mini] position save failed: {error}");
                 }
@@ -142,6 +171,142 @@ fn schedule_position(app: &AppHandle, token: u64) {
         }
         state.position_pending.store(false, Ordering::Release);
     });
+}
+
+fn settle_window(window: &WebviewWindow, snap: bool) -> Result<(), String> {
+    let pos = window.outer_position().map_err(err)?;
+    let size = window.outer_size().map_err(err)?;
+    let center = (
+        i64::from(pos.x) + i64::from(size.width) / 2,
+        i64::from(pos.y) + i64::from(size.height) / 2,
+    );
+    let monitors = window.available_monitors().map_err(err)?;
+    let selected = monitors
+        .iter()
+        .find(|m| {
+            let p = m.position();
+            let s = m.size();
+            center.0 >= i64::from(p.x)
+                && center.1 >= i64::from(p.y)
+                && center.0 < i64::from(p.x) + i64::from(s.width)
+                && center.1 < i64::from(p.y) + i64::from(s.height)
+        })
+        .cloned()
+        .or(window.current_monitor().map_err(err)?)
+        .or(window.primary_monitor().map_err(err)?)
+        .ok_or("no available monitor")?;
+    let point = position::settle(
+        work_area(&selected),
+        Point { x: pos.x, y: pos.y },
+        size.width,
+        size.height,
+        snap,
+    );
+    if point.x != pos.x || point.y != pos.y {
+        window
+            .set_position(PhysicalPosition::new(point.x, point.y))
+            .map_err(err)?;
+        // A native dispatcher barrier: programmatic Moved events are processed
+        // before the drag flag is released and before final persistence.
+        let _ = window.outer_position().map_err(err)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn drag_released(app: &AppHandle) {
+    if let Some(done) = app.state::<MiniState>().drag_done.lock().unwrap().take() {
+        let _ = done.send(());
+    }
+}
+
+pub async fn drag(app: AppHandle, token: u64) -> Result<(), String> {
+    let state = app.state::<MiniState>();
+    let gate = state.gate.lock().await;
+    current(&app, token)?;
+    if info(&app, token)?.position_locked {
+        return Ok(());
+    }
+    let window = app
+        .get_webview_window("mini")
+        .ok_or("mini window not found")?;
+    #[cfg(not(target_os = "windows"))]
+    {
+        drop(gate);
+        return window.start_dragging().map_err(err);
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if !state.native_ready.load(Ordering::Acquire) {
+            return Err("native drag boundary unavailable".into());
+        }
+        if state.dragging.swap(true, Ordering::AcqRel) {
+            return Ok(());
+        }
+        let original = match window.outer_position() {
+            Ok(value) => value,
+            Err(error) => {
+                state.dragging.store(false, Ordering::Release);
+                return Err(err(error));
+            }
+        };
+        let (done, wait) = tokio::sync::oneshot::channel();
+        *state.drag_done.lock().map_err(err)? = Some(done);
+        state.drag_entered.store(false, Ordering::Release);
+        if let Err(error) = window.start_dragging() {
+            state.dragging.store(false, Ordering::Release);
+            state.drag_done.lock().unwrap().take();
+            return Err(err(error));
+        }
+        drop(gate);
+        let result = wait.await.map_err(err);
+        let _gate = state.gate.lock().await;
+        let result = result.and_then(|()| {
+            current(&app, token)?;
+            let landed = window.outer_position().map_err(err)?;
+            let snap = info(&app, token)?.snap_enabled
+                && state.drag_entered.load(Ordering::Acquire)
+                && landed != original;
+            settle_window(&window, snap)
+        });
+        state.dragging.store(false, Ordering::Release);
+        if result.is_ok() {
+            schedule_position(&app, token);
+        }
+        result
+    }
+}
+
+pub async fn set_behavior(
+    app: AppHandle,
+    token: u64,
+    key: String,
+    value: bool,
+) -> Result<MiniInfo, String> {
+    let state = app.state::<MiniState>();
+    let _gate = state.gate.lock().await;
+    current(&app, token)?;
+    let stored = match key.as_str() {
+        "snap" => "mini_snap_enabled",
+        "locked" => "mini_position_locked",
+        _ => return Err("invalid mini preference".into()),
+    };
+    {
+        let db = app.state::<DbState>();
+        settings::save_setting(
+            &*db.lock().map_err(err)?,
+            stored,
+            if value { "true" } else { "false" },
+        )
+        .map_err(err)?;
+    }
+    if key == "locked" {
+        state.position_locked.store(value, Ordering::Release);
+    }
+    let value = info(&app, token)?;
+    app.emit_to("mini", "mini:preferences", &value)
+        .map_err(err)?;
+    Ok(value)
 }
 
 async fn close_inner(app: &AppHandle, reason: CloseReason) -> Result<(), String> {
@@ -285,6 +450,7 @@ pub async fn open(app: AppHandle) -> Result<(), String> {
     let Some(token) = state.lifecycle.lock().map_err(err)?.begin() else {
         return Ok(());
     };
+    state.native_ready.store(false, Ordering::Release);
     let result = (|| -> Result<(), String> {
         let main = app
             .get_webview_window("main")
@@ -292,6 +458,10 @@ pub async fn open(app: AppHandle) -> Result<(), String> {
         let (saved, top) = {
             let db = app.state::<DbState>();
             let conn = db.lock().map_err(err)?;
+            state.position_locked.store(
+                settings::get_setting(&conn, "mini_position_locked").as_deref() == Some("true"),
+                Ordering::Release,
+            );
             preferences(&conn)?
         };
         let monitors = main.available_monitors().map_err(err)?;
@@ -338,6 +508,8 @@ pub async fn open(app: AppHandle) -> Result<(), String> {
             .set_position(PhysicalPosition::new(point.x, point.y))
             .map_err(err)?;
         window.set_size(LogicalSize::new(SIZE, SIZE)).map_err(err)?;
+        #[cfg(target_os = "windows")]
+        windows::install(&window, token)?;
         let app_event = app.clone();
         let window_event = window.clone();
         window.on_window_event(move |event| match event {
@@ -362,9 +534,24 @@ pub async fn open(app: AppHandle) -> Result<(), String> {
                     request_restore_for_token(&app_event, token);
                 }
             }
-            tauri::WindowEvent::Moved(_) => schedule_position(&app_event, token),
+            tauri::WindowEvent::Moved(_) => {
+                if !app_event
+                    .state::<MiniState>()
+                    .dragging
+                    .load(Ordering::Acquire)
+                {
+                    schedule_position(&app_event, token);
+                }
+            }
             tauri::WindowEvent::ScaleFactorChanged { .. } => {
                 let _ = window_event.set_size(LogicalSize::new(SIZE, SIZE));
+                if app_event
+                    .state::<MiniState>()
+                    .dragging
+                    .load(Ordering::Acquire)
+                {
+                    return;
+                }
                 if let (Ok(Some(monitor)), Ok(pos)) = (
                     window_event.current_monitor(),
                     window_event.outer_position(),
@@ -510,6 +697,24 @@ mod tests {
         settings::save_setting(&conn, "always_on_top", "false").unwrap();
         settings::save_setting(&conn, "window_x", "42").unwrap();
         assert_eq!(preferences(&conn).unwrap(), (None, true));
+        assert_ne!(
+            settings::get_setting(&conn, "mini_snap_enabled").as_deref(),
+            Some("false")
+        );
+        assert_ne!(
+            settings::get_setting(&conn, "mini_position_locked").as_deref(),
+            Some("true")
+        );
+        settings::save_setting(&conn, "mini_snap_enabled", "false").unwrap();
+        settings::save_setting(&conn, "mini_position_locked", "true").unwrap();
+        assert_eq!(
+            settings::get_setting(&conn, "mini_snap_enabled").as_deref(),
+            Some("false")
+        );
+        assert_eq!(
+            settings::get_setting(&conn, "mini_position_locked").as_deref(),
+            Some("true")
+        );
         settings::save_setting(&conn, "mini_position", r#"{"x":120,"y":240}"#).unwrap();
         settings::save_setting(&conn, "mini_always_on_top", "false").unwrap();
         assert_eq!(

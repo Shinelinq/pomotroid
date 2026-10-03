@@ -1,4 +1,5 @@
-use rusqlite::{params, Connection, Result};
+use super::categories::CategoryFilter;
+use rusqlite::{named_params, params, Connection, Result};
 use serde::Serialize;
 
 // ---------------------------------------------------------------------------
@@ -7,16 +8,31 @@ use serde::Serialize;
 
 /// Inserts a new session row when a round begins.
 /// Returns the row ID so it can be passed to `complete_session` later.
-pub fn insert_session(
+pub fn insert_session(conn: &Connection, round_type: &str, duration_secs: u32) -> Result<i64> {
+    insert_session_with_category(conn, round_type, duration_secs, None)
+}
+
+/// The category was locked at work-start. It may have been archived since then;
+/// the existing reference stays legal and must not be reassigned at first tick.
+pub fn insert_session_with_category(
     conn: &Connection,
     round_type: &str,
     duration_secs: u32,
+    category_id: Option<i64>,
 ) -> Result<i64> {
+    if let Some(id) = category_id {
+        super::categories::validate_id(id).map_err(rusqlite::Error::InvalidParameterName)?;
+        if round_type != "work" {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "category_work_only".into(),
+            ));
+        }
+    }
     let started_at = unix_now();
     conn.execute(
-        "INSERT INTO sessions (started_at, round_type, duration_secs, completed)
-         VALUES (?1, ?2, ?3, 0)",
-        params![started_at, round_type, duration_secs],
+        "INSERT INTO sessions (started_at, round_type, duration_secs, completed, category_id)
+         VALUES (?1, ?2, ?3, 0, ?4)",
+        params![started_at, round_type, duration_secs, category_id],
     )?;
     let id = conn.last_insert_rowid();
     log::debug!("[db] session started: id={id} type={round_type} duration={duration_secs}s");
@@ -24,11 +40,7 @@ pub fn insert_session(
 }
 
 /// Updates a session when the round ends (by completion or skip).
-pub fn complete_session(
-    conn: &Connection,
-    session_id: i64,
-    completed: bool,
-) -> Result<()> {
+pub fn complete_session(conn: &Connection, session_id: i64, completed: bool) -> Result<()> {
     conn.execute(
         "UPDATE sessions SET ended_at = ?1, completed = ?2 WHERE id = ?3",
         params![unix_now(), completed as i64, session_id],
@@ -50,22 +62,33 @@ pub struct SessionStats {
 }
 
 pub fn get_all_time_stats(conn: &Connection) -> Result<SessionStats> {
+    get_all_time_stats_filtered(conn, &CategoryFilter::All)
+}
+
+pub fn get_all_time_stats_filtered(
+    conn: &Connection,
+    filter: &CategoryFilter,
+) -> Result<SessionStats> {
+    let condition = filter.condition();
+    filter.validate(conn)?;
     let total_work_sessions: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM sessions WHERE round_type = 'work'",
-        [],
+        &format!("SELECT COUNT(*) FROM sessions WHERE round_type = 'work' AND ({condition})"),
+        named_params! { ":category_id": filter.id() },
         |r| r.get(0),
     )?;
 
     let completed_work_sessions: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM sessions WHERE round_type = 'work' AND completed = 1",
-        [],
+        &format!("SELECT COUNT(*) FROM sessions WHERE round_type = 'work' AND ({condition}) AND completed = 1"),
+        named_params! { ":category_id": filter.id() },
         |r| r.get(0),
     )?;
 
     let total_work_secs = conn.query_row(
-        "SELECT COALESCE(SUM(duration_secs), 0)
-         FROM sessions WHERE round_type = 'work' AND completed = 1",
-        [],
+        &format!(
+            "SELECT COALESCE(SUM(duration_secs), 0)
+         FROM sessions WHERE round_type = 'work' AND ({condition}) AND completed = 1"
+        ),
+        named_params! { ":category_id": filter.id() },
         |r| read_focus_secs(r, 0),
     )?;
 
@@ -126,54 +149,78 @@ pub struct StreakInfo {
 
 /// Completed work rounds and focus time for today (local calendar date).
 pub fn get_daily_stats(conn: &Connection) -> Result<DailyStats> {
-    let today: String = conn.query_row("SELECT date('now', 'localtime')", [], |r| r.get(0))?;
-
-    get_daily_stats_for_date(conn, &today)
+    get_daily_stats_filtered(conn, &CategoryFilter::All)
 }
 
+pub fn get_daily_stats_filtered(conn: &Connection, filter: &CategoryFilter) -> Result<DailyStats> {
+    filter.validate(conn)?;
+    let today: String = conn.query_row("SELECT date('now', 'localtime')", [], |r| r.get(0))?;
+
+    get_daily_stats_for_date_filtered(conn, &today, filter)
+}
+
+#[cfg(test)]
 fn get_daily_stats_for_date(conn: &Connection, today: &str) -> Result<DailyStats> {
+    get_daily_stats_for_date_filtered(conn, today, &CategoryFilter::All)
+}
+
+fn get_daily_stats_for_date_filtered(
+    conn: &Connection,
+    today: &str,
+    filter: &CategoryFilter,
+) -> Result<DailyStats> {
+    let condition = filter.condition();
     let total: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM sessions
-         WHERE round_type = 'work'
-         AND date(started_at, 'unixepoch', 'localtime') = ?1",
-        [&today],
+        &format!(
+            "SELECT COUNT(*) FROM sessions
+         WHERE round_type = 'work' AND ({condition})
+         AND date(started_at, 'unixepoch', 'localtime') = :date"
+        ),
+        named_params! { ":date": today, ":category_id": filter.id() },
         |r| r.get(0),
     )?;
 
     let completed: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM sessions
-         WHERE round_type = 'work' AND completed = 1
-         AND date(started_at, 'unixepoch', 'localtime') = ?1",
-        [&today],
+        &format!(
+            "SELECT COUNT(*) FROM sessions
+         WHERE round_type = 'work' AND ({condition}) AND completed = 1
+         AND date(started_at, 'unixepoch', 'localtime') = :date"
+        ),
+        named_params! { ":date": today, ":category_id": filter.id() },
         |r| r.get(0),
     )?;
 
     let focus_secs: i64 = conn.query_row(
-        "SELECT COALESCE(SUM(duration_secs), 0) FROM sessions
-         WHERE round_type = 'work' AND completed = 1
-         AND date(started_at, 'unixepoch', 'localtime') = ?1",
-        [&today],
+        &format!(
+            "SELECT COALESCE(SUM(duration_secs), 0) FROM sessions
+         WHERE round_type = 'work' AND ({condition}) AND completed = 1
+         AND date(started_at, 'unixepoch', 'localtime') = :date"
+        ),
+        named_params! { ":date": today, ":category_id": filter.id() },
         |r| r.get(0),
     )?;
 
     let mut by_hour = vec![0u32; 24];
     let mut by_hour_focus_secs = vec![0u64; 24];
     let mut stmt = conn.prepare(
-        "SELECT CAST(strftime('%H', datetime(started_at, 'unixepoch', 'localtime')) AS INTEGER) as h,
+        &format!("SELECT CAST(strftime('%H', datetime(started_at, 'unixepoch', 'localtime')) AS INTEGER) as h,
                 COUNT(*) as cnt,
                 COALESCE(SUM(duration_secs), 0) as focus_secs
          FROM sessions
-         WHERE round_type = 'work' AND completed = 1
-         AND date(started_at, 'unixepoch', 'localtime') = ?1
-         GROUP BY h",
+         WHERE round_type = 'work' AND ({condition}) AND completed = 1
+         AND date(started_at, 'unixepoch', 'localtime') = :date
+         GROUP BY h"),
     )?;
-    let rows = stmt.query_map([today], |r| {
-        Ok((
-            r.get::<_, i64>(0)?,
-            r.get::<_, u32>(1)?,
-            read_focus_secs(r, 2)?,
-        ))
-    })?;
+    let rows = stmt.query_map(
+        named_params! { ":date": today, ":category_id": filter.id() },
+        |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, u32>(1)?,
+                read_focus_secs(r, 2)?,
+            ))
+        },
+    )?;
     for row in rows {
         let (h, cnt, seconds) = row?;
         if (0..24).contains(&h) {
@@ -199,48 +246,78 @@ fn get_daily_stats_for_date(conn: &Connection, today: &str) -> Result<DailyStats
 
 /// Recorded work sessions, completed rounds and focus seconds for the last 7 local days.
 pub fn get_weekly_stats(conn: &Connection) -> Result<Vec<DayStat>> {
+    get_weekly_stats_filtered(conn, &CategoryFilter::All)
+}
+
+pub fn get_weekly_stats_filtered(
+    conn: &Connection,
+    filter: &CategoryFilter,
+) -> Result<Vec<DayStat>> {
+    filter.validate(conn)?;
     let today: String = conn.query_row("SELECT date('now', 'localtime')", [], |r| r.get(0))?;
-    get_weekly_stats_for_date(conn, &today)
+    get_weekly_stats_for_date_filtered(conn, &today, filter)
 }
 
 /// The reference date is local, so calendar arithmetic also handles non-24-hour days.
+#[cfg(test)]
 fn get_weekly_stats_for_date(conn: &Connection, today: &str) -> Result<Vec<DayStat>> {
-    let mut stmt = conn.prepare(
+    get_weekly_stats_for_date_filtered(conn, today, &CategoryFilter::All)
+}
+
+fn get_weekly_stats_for_date_filtered(
+    conn: &Connection,
+    today: &str,
+    filter: &CategoryFilter,
+) -> Result<Vec<DayStat>> {
+    let condition = filter.condition();
+    let mut stmt = conn.prepare(&format!(
         "SELECT date(started_at, 'unixepoch', 'localtime') as day,
                 SUM(CASE WHEN completed = 1 THEN 1 ELSE 0 END) as rounds,
                 COUNT(*) as started_rounds,
                 SUM(CASE WHEN completed = 1 THEN duration_secs ELSE 0 END) as focus_secs
          FROM sessions
-         WHERE round_type = 'work'
-         AND date(started_at, 'unixepoch', 'localtime') >= date(?1, '-6 days')
-         AND date(started_at, 'unixepoch', 'localtime') < date(?1, '+1 day')
+         WHERE round_type = 'work' AND ({condition})
+         AND date(started_at, 'unixepoch', 'localtime') >= date(:date, '-6 days')
+         AND date(started_at, 'unixepoch', 'localtime') < date(:date, '+1 day')
          GROUP BY day
-         ORDER BY day",
+         ORDER BY day"
+    ))?;
+    let rows = stmt.query_map(
+        named_params! { ":date": today, ":category_id": filter.id() },
+        |r| {
+            Ok(DayStat {
+                date: r.get(0)?,
+                rounds: r.get(1)?,
+                started_rounds: r.get(2)?,
+                focus_secs: read_focus_secs(r, 3)?,
+            })
+        },
     )?;
-    let rows = stmt.query_map([today], |r| {
-        Ok(DayStat {
-            date: r.get(0)?,
-            rounds: r.get(1)?,
-            started_rounds: r.get(2)?,
-            focus_secs: read_focus_secs(r, 3)?,
-        })
-    })?;
     rows.collect()
 }
 
 /// Completed work rounds per local calendar day, all time (no date limit).
 /// The frontend slices this into per-year views for navigation.
 pub fn get_heatmap_data(conn: &Connection) -> Result<Vec<HeatmapEntry>> {
-    let mut stmt = conn.prepare(
+    get_heatmap_data_filtered(conn, &CategoryFilter::All)
+}
+
+pub fn get_heatmap_data_filtered(
+    conn: &Connection,
+    filter: &CategoryFilter,
+) -> Result<Vec<HeatmapEntry>> {
+    let condition = filter.condition();
+    filter.validate(conn)?;
+    let mut stmt = conn.prepare(&format!(
         "SELECT date(started_at, 'unixepoch', 'localtime') as day,
                 COUNT(*) as cnt,
                 SUM(duration_secs) as focus_secs
          FROM sessions
-         WHERE round_type = 'work' AND completed = 1
+         WHERE round_type = 'work' AND ({condition}) AND completed = 1
          GROUP BY day
-         ORDER BY day",
-    )?;
-    let rows = stmt.query_map([], |r| {
+         ORDER BY day"
+    ))?;
+    let rows = stmt.query_map(named_params! { ":category_id": filter.id() }, |r| {
         Ok(HeatmapEntry {
             date: r.get(0)?,
             count: r.get(1)?,
@@ -254,23 +331,24 @@ pub fn get_heatmap_data(conn: &Connection) -> Result<Vec<HeatmapEntry>> {
 /// A streak stays active until midnight: if yesterday had sessions but today does not,
 /// the streak is still counted as current.
 pub fn get_streak(conn: &Connection) -> Result<StreakInfo> {
-    let today: String = conn.query_row(
-        "SELECT date('now', 'localtime')",
-        [],
-        |r| r.get(0),
-    )?;
+    get_streak_filtered(conn, &CategoryFilter::All)
+}
 
-    let mut stmt = conn.prepare(
+pub fn get_streak_filtered(conn: &Connection, filter: &CategoryFilter) -> Result<StreakInfo> {
+    let condition = filter.condition();
+    filter.validate(conn)?;
+    let today: String = conn.query_row("SELECT date('now', 'localtime')", [], |r| r.get(0))?;
+
+    let mut stmt = conn.prepare(&format!(
         "SELECT date(started_at, 'unixepoch', 'localtime') as day
          FROM sessions
-         WHERE round_type = 'work' AND completed = 1
+         WHERE round_type = 'work' AND ({condition}) AND completed = 1
          GROUP BY day
-         ORDER BY day",
-    )?;
+         ORDER BY day"
+    ))?;
     let days: Vec<String> = stmt
-        .query_map([], |r| r.get(0))?
-        .flatten()
-        .collect();
+        .query_map(named_params! { ":category_id": filter.id() }, |r| r.get(0))?
+        .collect::<Result<Vec<_>>>()?;
 
     Ok(compute_streak(&days, &today))
 }

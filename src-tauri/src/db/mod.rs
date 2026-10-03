@@ -1,5 +1,7 @@
+pub mod categories;
 pub mod migrations;
 pub mod queries;
+pub mod session_details;
 
 use rusqlite::{Connection, Result};
 use std::sync::{Arc, Mutex};

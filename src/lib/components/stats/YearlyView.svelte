@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
+  import type { ChartSelection, DetailEntry } from './sessionDetails';
   import type { HeatmapStats, HeatmapEntry } from '$lib/types';
   import * as m from '$paraglide/messages.js';
   import { getLocale } from '$paraglide/runtime.js';
@@ -23,21 +25,27 @@
     heatmap,
     today,
     loading = false,
+    initialSelection,
+    onopen,
+    scopeLabel = null,
     metric = $bindable<Metric>('time'),
     selectedYear = $bindable(new Date().getFullYear()),
   }: {
     heatmap: HeatmapStats | null;
     today: string;
     loading?: boolean;
+    initialSelection?: ChartSelection | null;
+    onopen?: (entry: DetailEntry) => void;
+    scopeLabel?: string | null;
     metric?: Metric;
     selectedYear?: number;
   } = $props();
-  const interaction = createChartInteraction();
+  const interaction = createChartInteraction(untrack(() => initialSelection?.pinned ?? null));
   const legendInteraction = createChartInteraction();
   const tooltipId = 'yearly-date-tooltip';
   let chart = $state<SVGSVGElement>();
   let containerWidth = $state(0);
-  let focusedDate = $state<string | null>(null);
+  let focusedDate = $state<string | null>(untrack(() => initialSelection?.focused ?? null));
   const currentYear = $derived(Number(today.slice(0, 4)));
   const firstYear = $derived(
     Math.min(currentYear, ...(heatmap?.entries ?? []).map((d) => Number(d.date.slice(0, 4))))
@@ -107,16 +115,22 @@
         ]
   );
 
+  let previousRange: number | undefined;
   $effect(() => {
-    selectedYear;
-    interaction.clear();
-    legendInteraction.clear();
-    focusedDate = null;
+    const range = selectedYear;
+    if (previousRange !== undefined && previousRange !== range) {
+      interaction.clear();
+      legendInteraction.clear();
+      focusedDate = null;
+    }
+    previousRange = range;
   });
   $effect(() => {
-    if (heatmap && (selectedYear < firstYear || selectedYear > currentYear))
-      selectedYear = currentYear;
+    if (heatmap && selectedYear > currentYear) selectedYear = currentYear;
   });
+  export function selection(): ChartSelection {
+    return { pinned: interaction.pinned, focused: focusedDate };
+  }
   function show(event: PointerEvent | FocusEvent, cell: CalendarCell, immediate = false) {
     legendInteraction.hidePreview();
     interaction.show(cell.date, event.currentTarget as SVGRectElement, immediate);
@@ -308,11 +322,21 @@
         date={pinned ? fullDate.format(localDate(pinned.date)) : null}
         lines={pinned ? details(pinned) : []}
         onclear={interaction.unpin}
+        entryKey="year-day"
+        onrecords={pinned && onopen
+          ? () => {
+              if (pinned) onopen?.({ date: pinned.date, focusKey: 'year-day' });
+            }
+          : undefined}
       />
     </div>
   </div>
   <div class="lifetime">
-    <h2>{m.stats_lifetime()}</h2>
+    <h2>
+      {scopeLabel
+        ? m.category_scope_title({ title: m.stats_lifetime(), name: scopeLabel })
+        : m.stats_lifetime()}
+    </h2>
     <StatsSummary
       compact
       items={[

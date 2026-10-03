@@ -1,7 +1,6 @@
 <script lang="ts">
   import '../../app.css';
   import { onMount, tick } from 'svelte';
-  import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
   import { error as logError } from '@tauri-apps/plugin-log';
   import MiniTimer from '$lib/components/MiniTimer.svelte';
   import {
@@ -11,6 +10,7 @@
     onThemesChanged,
     getTimerState,
     onTimerTick,
+    onTimerState,
     onTimerPaused,
     onTimerResumed,
     onRoundChange,
@@ -24,7 +24,9 @@
     restoreFromMini,
     hideMiniToTray,
     setMiniTop,
-    saveMiniPosition,
+    dragMini,
+    setMiniBehavior,
+    onMiniPreferences,
     exitFromMini,
   } from '$lib/ipc';
   import { syncMiniTimer } from '$lib/mini/sync';
@@ -32,7 +34,7 @@
   import { setLocale } from '$lib/locale.svelte.js';
   import { resolveThemeName } from '$lib/utils/theme';
   import { applyTheme } from '$lib/stores/theme';
-  import type { TimerState, Settings, Theme } from '$lib/types';
+  import type { MiniInfo, TimerState, Settings, Theme } from '$lib/types';
 
   const token = Number(new URLSearchParams(window.location.search).get('instance'));
   let timerSnapshot = $state<TimerState | null>(null);
@@ -41,6 +43,8 @@
   let failed = $state(false);
   let disposed = false;
   let menuOpen = false;
+  let menuClosedAt = 0;
+  let miniInfo = $state<MiniInfo | null>(null);
   let saved: Settings | null = null;
   let themes: Theme[] = [];
   let settingsRevision = 0;
@@ -81,10 +85,9 @@
   }
   const restore = () => windowAction(() => restoreFromMini(token));
   async function drag() {
-    if (disposed || menuOpen) return;
+    if (disposed || menuOpen || miniInfo?.position_locked) return;
     await windowAction(async () => {
-      await getCurrentWebviewWindow().startDragging();
-      if (!disposed) await saveMiniPosition(token);
+      await dragMini(token);
     });
   }
   async function menu() {
@@ -92,12 +95,21 @@
     menuOpen = true;
     try {
       const info = await getMiniInfo(token);
+      miniInfo = info;
       if (disposed) return;
       await popupMiniMenu(failed || busy ? null : timerSnapshot, info, {
         toggle: () => void timerAction(timerToggle),
         restart: () => void timerAction(timerRestartRound),
         skip: () => void timerAction(timerSkip),
         top: () => void windowAction(() => setMiniTop(token, !info.always_on_top)),
+        snap: () =>
+          void windowAction(async () => {
+            miniInfo = await setMiniBehavior(token, 'snap', !info.snap_enabled);
+          }),
+        lock: () =>
+          void windowAction(async () => {
+            miniInfo = await setMiniBehavior(token, 'locked', !info.position_locked);
+          }),
         restore: () => void restore(),
         hide: () => void windowAction(() => hideMiniToTray(token)),
         exit: () => void windowAction(() => exitFromMini(token)),
@@ -106,13 +118,14 @@
       void report(error);
     } finally {
       menuOpen = false;
+      menuClosedAt = performance.now();
     }
   }
   function keydown(event: KeyboardEvent) {
     if (event.key !== 'Escape') return;
     event.preventDefault();
     event.stopPropagation();
-    if (!menuOpen && !event.repeat) void restore();
+    if (!menuOpen && performance.now() - menuClosedAt > 250 && !event.repeat) void restore();
   }
 
   onMount(() => {
@@ -128,6 +141,12 @@
     void (async () => {
       try {
         if (!Number.isSafeInteger(token) || token <= 0) throw new Error('invalid mini instance');
+        await keep(
+          onMiniPreferences((value) => {
+            miniInfo = value;
+          })
+        );
+        miniInfo = await getMiniInfo(token);
         // Observe settings and theme changes before reading their initial snapshots.
         await Promise.all([
           keep(
@@ -163,6 +182,7 @@
         sync = syncMiniTimer(
           {
             getTimerState,
+            onTimerState,
             onTimerTick,
             onTimerPaused,
             onTimerResumed,
@@ -201,6 +221,7 @@
 <svelte:window onkeydown={keydown} />
 <MiniTimer
   {timerSnapshot}
+  locked={miniInfo?.position_locked ?? false}
   {smooth}
   {busy}
   error={failed}

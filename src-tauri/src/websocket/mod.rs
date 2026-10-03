@@ -270,6 +270,7 @@ mod tests {
             work_round_number: 1,
             work_rounds_total: 4,
             session_work_count: 1,
+            ..TimerSnapshot::default()
         }
     }
 

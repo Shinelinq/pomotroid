@@ -122,6 +122,7 @@ fn drain_within(rx: &mpsc::Receiver<notify::Result<Event>>, window: Duration) {
 /// Re-scan themes directory and emit `themes:changed` with the updated list.
 fn reload_and_emit(app_data_dir: &Path, app: &AppHandle) {
     let themes: Vec<Theme> = list_all(app_data_dir);
+    crate::tray::refresh(app);
     if let Err(e) = app.emit("themes:changed", &themes) {
         log::warn!("[themes/watcher] emit error: {e}");
     }

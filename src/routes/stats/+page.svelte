@@ -20,9 +20,15 @@
   import AuxiliaryWindowControls from '$lib/components/AuxiliaryWindowControls.svelte';
   import { isMac } from '$lib/utils/platform';
   import type { UnlistenFn } from '@tauri-apps/api/event';
-  import type { DetailedStats, HeatmapStats, Theme } from '$lib/types';
+  import type { DetailedStats, HeatmapStats, Theme, CategoryFilter as Filter } from '$lib/types';
+  import CategoryFilter from '$lib/components/categories/CategoryFilter.svelte';
+  import { categories } from '$lib/categories/state';
+  import { filterKey, filterName } from '$lib/categories/format';
+  import { createRequestScope } from '$lib/components/stats/requestScope';
   import * as m from '$paraglide/messages.js';
   import { error as logError } from '@tauri-apps/plugin-log';
+  import DayDetail from '$lib/components/stats/DayDetail.svelte';
+  import type { ChartSelection, DetailEntry } from '$lib/components/stats/sessionDetails';
   import DailyView from '$lib/components/stats/DailyView.svelte';
   import WeeklyView from '$lib/components/stats/WeeklyView.svelte';
   import YearlyView from '$lib/components/stats/YearlyView.svelte';
@@ -45,12 +51,105 @@
   let initError = $state(false);
   let ready = false;
   let disposed = false;
-  let detailedRequest = 0;
-  let heatmapRequest = 0;
+  const requests = createRequestScope();
+  let filter = $state<Filter>({ kind: 'all' });
+  let filterEpoch = $state(0);
+  const scopeName = $derived(filterName($categories?.data.items ?? [], filter));
   let detailedAt = 0;
   let heatmapAt = 0;
   let knownThemes: Theme[] = [];
   let content: HTMLDivElement;
+  let detail = $state<{ date: string; hour: number | null; filter: Filter } | null>(null);
+  let dailyView = $state<DailyView>();
+  let weeklyView = $state<WeeklyView>();
+  let yearlyView = $state<YearlyView>();
+  let initialSelection = $state<ChartSelection | null>(null);
+  type ReturnState = {
+    tab: Tab;
+    weeklyMetric: Metric;
+    yearlyMetric: Metric;
+    selectedYear: number;
+    filter: Filter;
+    selection: ChartSelection | null;
+    scroll: number;
+    focusKey: string;
+  };
+  let origin: ReturnState | null = null;
+  let restoration = $state<{ scroll: number; focusKey: string; tab: Tab; token: number } | null>(
+    null
+  );
+  let navigation = 0;
+  function openDetail(entry: DetailEntry) {
+    ++navigation;
+    restoration = null;
+    origin = {
+      tab: activeTab,
+      weeklyMetric,
+      yearlyMetric,
+      selectedYear,
+      filter: { ...filter },
+      selection:
+        (activeTab === 'today'
+          ? dailyView
+          : activeTab === 'week'
+            ? weeklyView
+            : yearlyView
+        )?.selection() ?? null,
+      scroll: content?.scrollTop ?? 0,
+      focusKey: entry.focusKey,
+    };
+    detail = { date: entry.date, hour: entry.hour ?? null, filter: { ...filter } };
+    if (content) content.scrollTop = 0;
+  }
+  function leaveDetail(tab: Tab, restore = false) {
+    const saved = restore ? origin : null;
+    const token = ++navigation;
+    activeTab = tab;
+    initialSelection = saved?.selection ?? null;
+    if (saved) {
+      weeklyMetric = saved.weeklyMetric;
+      yearlyMetric = saved.yearlyMetric;
+      selectedYear = saved.selectedYear;
+      filter = saved.filter;
+    }
+    // Clear visible aggregates before showing the overview; reload the real range.
+    if (tab === 'alltime') {
+      heatmap = null;
+      heatmapAt = 0;
+    } else {
+      detailed = null;
+      detailedAt = 0;
+    }
+    detail = null;
+    origin = null;
+    restoration = saved ? { scroll: saved.scroll, focusKey: saved.focusKey, tab, token } : null;
+    if (content) content.scrollTop = 0;
+    refresh(true);
+  }
+  const backToStats = () => leaveDetail(origin?.tab ?? activeTab, true);
+  $effect(() => {
+    const pending = restoration;
+    if (!pending || detail || loading) return;
+    let alive = true;
+    void (async () => {
+      await tick();
+      await new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+      );
+      if (!alive || disposed || detail || pending.token !== navigation) return;
+      if (content) content.scrollTop = pending.scroll;
+      const entry = document.querySelector<HTMLElement>(
+        `[data-detail-entry="${pending.focusKey}"]`
+      );
+      (entry ?? document.getElementById(`stats-tab-${pending.tab}`))?.focus({
+        preventScroll: true,
+      });
+      restoration = null;
+    })();
+    return () => {
+      alive = false;
+    };
+  });
   const STALE_MS = 30_000;
   const hasError = $derived(initError || (activeTab === 'alltime' ? heatmapError : detailedError));
   const loading = $derived(activeTab === 'alltime' ? heatmapLoading : detailedLoading);
@@ -67,21 +166,22 @@
           Date.now() - detailedAt < STALE_MS))
     )
       return;
-    const request = ++detailedRequest;
+    const currentRequest = requests.begin('detailed');
+    const requestedFilter = filter;
     const requestedDate = dateKey(new Date());
     detailedLoading = true;
     try {
-      const result = await statsGetDetailed();
-      if (disposed || request !== detailedRequest) return;
+      const result = await statsGetDetailed(requestedFilter);
+      if (disposed || !currentRequest()) return;
       detailed = result;
       detailedDate = requestedDate;
       detailedAt = Date.now();
       detailedError = false;
     } catch (error) {
-      if (!disposed && request === detailedRequest) detailedError = true;
+      if (!disposed && currentRequest()) detailedError = true;
       void reportError('detailed query failed', error);
     } finally {
-      if (!disposed && request === detailedRequest) detailedLoading = false;
+      if (!disposed && currentRequest()) detailedLoading = false;
     }
   }
   async function loadHeatmap(force = false) {
@@ -90,32 +190,68 @@
       (heatmapLoading || (heatmap && !heatmapError && Date.now() - heatmapAt < STALE_MS))
     )
       return;
-    const request = ++heatmapRequest;
+    const currentRequest = requests.begin('heatmap');
+    const requestedFilter = filter;
     heatmapLoading = true;
     try {
-      const result = await statsGetHeatmap();
-      if (disposed || request !== heatmapRequest) return;
+      const result = await statsGetHeatmap(requestedFilter);
+      if (disposed || !currentRequest()) return;
       heatmap = result;
       heatmapAt = Date.now();
       heatmapError = false;
     } catch (error) {
-      if (!disposed && request === heatmapRequest) heatmapError = true;
+      if (!disposed && currentRequest()) heatmapError = true;
       void reportError('heatmap query failed', error);
     } finally {
-      if (!disposed && request === heatmapRequest) heatmapLoading = false;
+      if (!disposed && currentRequest()) heatmapLoading = false;
     }
   }
   function refresh(force = false) {
     const nextDate = dateKey(new Date());
     const dayChanged = nextDate !== today;
     today = nextDate;
-    if (!ready || disposed) return;
+    if (!ready || disposed || detail) return;
     if (force || activeTab !== 'alltime' || dayChanged) void loadDetailed(force || dayChanged);
     if (activeTab === 'alltime' || ((force || dayChanged) && heatmap !== null))
       void loadHeatmap(force || dayChanged);
   }
+  function changeFilter(next: Filter) {
+    if (detail || filterKey(next) === filterKey(filter)) return;
+    initialSelection = null;
+    restoration = null;
+    ++navigation;
+    filter = next;
+    ++filterEpoch;
+    requests.invalidate();
+    detailed = null;
+    heatmap = null;
+    detailedAt = 0;
+    heatmapAt = 0;
+    detailedLoading = false;
+    heatmapLoading = false;
+    detailedError = false;
+    heatmapError = false;
+    refresh(true);
+  }
+  const noScopeData = $derived(
+    filter.kind !== 'all' &&
+      !loading &&
+      !hasError &&
+      (activeTab === 'alltime'
+        ? heatmap !== null && heatmap.total_rounds === 0
+        : activeTab === 'today'
+          ? detailed !== null && detailed.today.completion_rate === null
+          : detailed !== null && detailed.week.every((day) => day.started_rounds === 0))
+  );
   function switchTab(tab: Tab) {
+    if (detail) {
+      leaveDetail(tab, tab === origin?.tab);
+      return;
+    }
     if (activeTab === tab) return;
+    initialSelection = null;
+    restoration = null;
+    ++navigation;
     activeTab = tab;
     if (content) content.scrollTop = 0;
     refresh();
@@ -165,6 +301,15 @@
 
   onMount(() => {
     const cleanups: UnlistenFn[] = [];
+    const escapeDetail = (event: KeyboardEvent) => {
+      if (!detail || event.key !== 'Escape' || event.defaultPrevented) return;
+      if (document.querySelector('[popover]:popover-open, dialog[open], [role="tooltip"]')) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      backToStats();
+    };
+    document.addEventListener('keydown', escapeDetail, true);
+    cleanups.push(() => document.removeEventListener('keydown', escapeDetail, true));
     async function keep(promise: Promise<UnlistenFn>) {
       try {
         const unlisten = await promise;
@@ -213,8 +358,7 @@
     void initialize();
     return () => {
       disposed = true;
-      ++detailedRequest;
-      ++heatmapRequest;
+      requests.invalidate();
       clearTimeout(midnightTimer);
       for (const unlisten of cleanups) unlisten();
       mq.removeEventListener('change', syncTheme);
@@ -234,62 +378,96 @@
   </nav>
 
   <!-- Existing tab styling is retained; only keyboard and tab semantics are added. -->
-  <div class="tabs" role="tablist" aria-label={m.stats_title()}>
-    {#each tabs as tab}
-      <button
-        id="stats-tab-{tab}"
-        class="tab"
-        class:active={activeTab === tab}
-        role="tab"
-        aria-selected={activeTab === tab}
-        aria-controls="stats-panel"
-        tabindex={activeTab === tab ? 0 : -1}
-        onclick={() => switchTab(tab)}
-        onkeydown={navigateTabs}
-        >{tab === 'today'
-          ? m.stats_tab_today()
-          : tab === 'week'
-            ? m.stats_tab_week()
-            : m.stats_tab_alltime()}</button
-      >
-    {/each}
+  <div class="stats-navigation">
+    <div class="tabs" role="tablist" aria-label={m.stats_title()}>
+      {#each tabs as tab}
+        <button
+          id="stats-tab-{tab}"
+          class="tab"
+          class:active={activeTab === tab}
+          role="tab"
+          aria-selected={activeTab === tab}
+          aria-controls="stats-panel"
+          tabindex={activeTab === tab ? 0 : -1}
+          onclick={() => switchTab(tab)}
+          onkeydown={navigateTabs}
+          >{tab === 'today'
+            ? m.stats_tab_today()
+            : tab === 'week'
+              ? m.stats_tab_week()
+              : m.stats_tab_alltime()}</button
+        >
+      {/each}
+    </div>
+    {#if !detail}<div class="category-filter">
+        <CategoryFilter value={filter} onchange={changeFilter} />
+      </div>{/if}
   </div>
 
   <div
     bind:this={content}
     class="content aux-scroll"
+    class:detail-content={!!detail}
     id="stats-panel"
     role="tabpanel"
     aria-labelledby="stats-tab-{activeTab}"
-    aria-busy={loading}
+    aria-busy={!detail && loading}
   >
-    {#if hasError}<div class="load-error" role="status">
-        <span>{m.stats_load_error()}</span><button onclick={retry} disabled={loading}
-          >{m.stats_retry()}</button
-        >
-      </div>{/if}
-    {#if activeTab === 'today'}
-      {#if detailed}<DailyView today={detailed.today} date={detailedDate} />{:else}<div
-          class="initial-loading"
-        >
-          {detailedLoading ? m.stats_loading() : '—'}
-        </div>{/if}
-    {:else if activeTab === 'week'}
-      <WeeklyView
-        week={detailed?.week ?? null}
-        streak={detailed?.streak ?? null}
-        today={detailed ? detailedDate : today}
-        loading={detailedLoading}
-        bind:metric={weeklyMetric}
+    {#if detail}
+      <DayDetail
+        initialDate={detail.date}
+        initialHour={detail.hour}
+        filter={detail.filter}
+        {today}
+        onback={backToStats}
       />
     {:else}
-      <YearlyView
-        {heatmap}
-        {today}
-        loading={heatmapLoading}
-        bind:metric={yearlyMetric}
-        bind:selectedYear
-      />
+      {#if hasError}<div class="load-error" role="status">
+          <span>{m.stats_load_error()}</span><button onclick={retry} disabled={loading}
+            >{m.stats_retry()}</button
+          >
+        </div>{/if}
+      {#if noScopeData}<div class="scope-empty">
+          <span>{m.category_no_data()}</span><button onclick={() => changeFilter({ kind: 'all' })}
+            >{m.category_view_all()}</button
+          >
+        </div>{/if}
+      {#key filterEpoch}
+        {#if activeTab === 'today'}
+          {#if detailed}<DailyView
+              bind:this={dailyView}
+              today={detailed.today}
+              date={detailedDate}
+              {initialSelection}
+              onopen={openDetail}
+            />{:else}<div class="initial-loading">
+              {detailedLoading ? m.stats_loading() : '—'}
+            </div>{/if}
+        {:else if activeTab === 'week'}
+          <WeeklyView
+            bind:this={weeklyView}
+            {initialSelection}
+            onopen={openDetail}
+            week={detailed?.week ?? null}
+            streak={detailed?.streak ?? null}
+            today={detailed ? detailedDate : today}
+            loading={detailedLoading}
+            bind:metric={weeklyMetric}
+          />
+        {:else}
+          <YearlyView
+            bind:this={yearlyView}
+            {initialSelection}
+            onopen={openDetail}
+            {heatmap}
+            {today}
+            loading={heatmapLoading}
+            bind:metric={yearlyMetric}
+            bind:selectedYear
+            scopeLabel={filter.kind === 'all' ? null : scopeName}
+          />
+        {/if}
+      {/key}
     {/if}
   </div>
 </div>
@@ -333,9 +511,48 @@
   .tabs {
     display: flex;
     gap: 0;
-    border-bottom: 1px solid var(--color-separator);
     flex-shrink: 0;
     padding: 0 24px;
+  }
+
+  .stats-navigation {
+    display: flex;
+    flex-wrap: wrap;
+    flex-shrink: 0;
+    border-bottom: 1px solid var(--color-separator);
+  }
+  .category-filter {
+    flex: 0 0 200px;
+    min-width: 0;
+    max-width: 100%;
+    height: 28px;
+    align-self: center;
+    margin-left: auto;
+    padding-right: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+  }
+  .scope-empty {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 24px;
+    font-size: 11px;
+    color: var(--color-foreground-darker);
+  }
+  .scope-empty button {
+    min-height: 28px;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--color-foreground);
+    font: inherit;
+    padding: 4px 6px;
+    cursor: pointer;
+  }
+  .scope-empty button:hover {
+    background: var(--color-hover);
   }
 
   .tab {
@@ -389,6 +606,9 @@
       --stats-detail-min: 40px;
       --stats-detail-y: 4px;
     }
+  }
+  .content.detail-content {
+    overflow: hidden;
   }
   .load-error {
     flex-shrink: 0;
