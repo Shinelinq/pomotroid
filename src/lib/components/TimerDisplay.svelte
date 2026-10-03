@@ -4,17 +4,21 @@
 
   interface Props {
     state: TimerState;
+    mainWindow?: boolean;
   }
 
-  let { state }: Props = $props();
+  let { state, mainWindow = false }: Props = $props();
 
   let remaining = $derived(state.total_secs - state.elapsed_secs);
   let minutes = $derived(Math.floor(remaining / 60));
   let seconds = $derived(remaining % 60);
   let display = $derived(`${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`);
+  // Tabular mono glyphs fit six characters at the standard size. Only longer
+  // values shrink, based on character count (never on the changing digit widths).
+  const timeFit = $derived(Math.min(1, 6 / display.length));
 </script>
 
-<div class="display">
+<div class="display" class:main-window={mainWindow} style:--time-fit={timeFit}>
   <span class="time">{display}</span>
 </div>
 
@@ -36,5 +40,12 @@
     font-stretch: 85%;
     letter-spacing: -0.02em;
     color: var(--color-foreground);
+  }
+
+  .main-window .time {
+    font-size: calc(var(--main-timer-time) * var(--time-fit));
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
   }
 </style>

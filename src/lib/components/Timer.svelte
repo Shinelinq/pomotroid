@@ -16,13 +16,16 @@
   import type { UnlistenFn } from '@tauri-apps/api/event';
   import * as m from '$paraglide/messages.js';
   import { notificationShow } from '$lib/ipc';
+  import { timerLayoutStyle, type MainTimerLayout } from '$lib/utils/mainTimerLayout';
 
   interface Props {
-    isCompact?: boolean;
-    uiScale?: number;
+    layout: MainTimerLayout;
+    extraStatusRows?: number;
   }
 
-  let { isCompact = false, uiScale = 1 }: Props = $props();
+  let { layout, extraStatusRows = $bindable(0) }: Props = $props();
+  const isCompact = $derived(layout.compact);
+  const layoutStyle = $derived(timerLayoutStyle(layout));
 
   let state = $derived($timerState);
 
@@ -74,25 +77,25 @@
   });
 </script>
 
-<div class="timer-outer" class:compact={isCompact}>
-  <div class="timer" style="--dial-size: {220 * uiScale}px">
+<div class="timer-outer" class:compact={isCompact} style={layoutStyle}>
+  <div class="timer">
     <!-- Dial + display stacked (display centered over dial) -->
     <div class="dial-stack">
-      <TimerDial snap={state} countdown={$settings.dial_countdown} />
-      <TimerDisplay {state} />
+      <TimerDial snap={state} countdown={$settings.dial_countdown} mainWindow />
+      <TimerDisplay {state} mainWindow />
     </div>
 
-    {#if !isCompact}
+    <div class="regular">
       <!-- Round type label sits below the dial as a normal flex child so it
            does not affect the dial-stack height used to centre TimerDisplay. -->
       <div class="round-label" style="color: {roundColor(state.round_type)}">
         {roundLabel(state.round_type)}
       </div>
 
-      <RoundStatus />
+      <RoundStatus onExtraRowsChange={(rows) => (extraStatusRows = rows)} />
       <div class="controls-wrapper">
         <!-- Back: restart current round -->
-        <Tooltip text={m.tooltip_restart_round()}>
+        <Tooltip text={m.tooltip_restart_round()} followLayout>
           <button class="btn-side" onclick={timerRestartRound} aria-label="Restart round">
             <svg width="18" height="18" viewBox="0 0 16 16">
               <polygon points="15,1 6,8 15,15" fill="currentColor" />
@@ -110,13 +113,13 @@
           {#key state.is_running}
             <span class="icon" in:fade={{ duration: 120 }}>
               {#if state.is_running}
-                <svg width="24" height="24" viewBox="0 0 24 24">
+                <svg viewBox="0 0 24 24">
                   <rect x="5" y="3" width="5" height="18" rx="1.5" fill="currentColor" />
                   <rect x="14" y="3" width="5" height="18" rx="1.5" fill="currentColor" />
                 </svg>
               {:else}
-                <svg width="18" height="18" viewBox="0 0 24 24" style="overflow: visible;">
-                  <polygon points="4,0 28,12 4,24" fill="currentColor" />
+                <svg viewBox="0 0 24 24">
+                  <polygon points="5,2 23,12 5,22" fill="currentColor" />
                 </svg>
               {/if}
             </span>
@@ -124,7 +127,7 @@
         </button>
 
         <!-- Skip: advance to next round -->
-        <Tooltip text={m.tooltip_skip()}>
+        <Tooltip text={m.tooltip_skip()} followLayout>
           <button class="btn-side" onclick={timerSkip} aria-label="Skip round">
             <svg width="18" height="18" viewBox="0 0 16 16">
               <polygon points="1,1 10,8 1,15" fill="currentColor" />
@@ -133,9 +136,9 @@
           </button>
         </Tooltip>
 
-        <TimerFooter snap={state} />
+        <TimerFooter snap={state} mainWindow />
       </div>
-    {/if}
+    </div>
   </div>
 
   {#if isCompact}
@@ -150,14 +153,22 @@
     align-items: center;
     gap: 8px;
     width: 100%;
+    flex: none;
   }
 
   .timer {
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 8px;
-    max-width: 100%;
+    width: 100%;
+  }
+
+  .regular {
+    display: contents;
+  }
+
+  .compact .regular {
+    display: none;
   }
 
   .dial-stack {
@@ -169,11 +180,16 @@
 
   .controls-wrapper {
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 4px 12px;
+    width: var(--main-timer-controls);
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-rows: var(--main-timer-play) var(--main-timer-footerHeight);
+    align-items: center;
+    justify-items: center;
+    row-gap: var(--main-timer-controlGap);
+    margin-top: var(--main-timer-controlGap);
   }
   .controls-wrapper > :global(*) {
-    aspect-ratio: 1;
+    min-width: 0;
   }
 
   .btn-side {
@@ -184,8 +200,8 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 32px;
-    height: 32px;
+    width: var(--main-timer-side);
+    height: var(--main-timer-side);
     border-radius: 4px;
     transition:
       color var(--transition-default),
@@ -205,10 +221,10 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 48px;
-    height: 48px;
+    width: var(--main-timer-play);
+    height: var(--main-timer-play);
     border-radius: 50%;
-    border: 2px solid var(--color-foreground-darker, var(--color-foreground));
+    border: var(--main-timer-border) solid var(--color-foreground-darker, var(--color-foreground));
     transition:
       color var(--transition-default),
       border-color var(--transition-default),
@@ -228,12 +244,39 @@
     justify-content: center;
   }
 
+  .icon svg {
+    width: var(--main-timer-playIcon);
+    height: var(--main-timer-playIcon);
+  }
+
+  .btn-side svg {
+    width: var(--main-timer-sideIcon);
+    height: var(--main-timer-sideIcon);
+  }
+
+  .controls-wrapper button:focus-visible {
+    outline: 2px solid var(--color-foreground);
+    outline-offset: 3px;
+  }
+
+  .compact :global(.mini-controls button) {
+    width: 32px;
+    height: 32px;
+  }
+
+  .compact :global(.mini-controls svg) {
+    width: 14px;
+    height: 14px;
+  }
+
   .round-label {
-    font-size: 0.75rem;
+    font-size: var(--main-timer-labelFont);
+    line-height: var(--main-timer-labelHeight);
+    height: var(--main-timer-labelHeight);
     font-weight: 600;
     letter-spacing: 0.08em;
     text-transform: uppercase;
-    /* Collapse the gap above: the flex gap already provides spacing from the dial. */
-    margin-top: 0;
+    margin-top: var(--main-timer-labelGap);
+    margin-bottom: var(--main-timer-statusGap);
   }
 </style>

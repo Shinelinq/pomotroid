@@ -5,7 +5,14 @@
     title = label,
     children,
     icon = false,
-  }: { label: string; title?: string; children: Snippet; icon?: boolean } = $props();
+    followLayout = false,
+  }: {
+    label: string;
+    title?: string;
+    children: Snippet;
+    icon?: boolean;
+    followLayout?: boolean;
+  } = $props();
   const id = $props.id();
   let trigger: HTMLButtonElement;
   let panel: HTMLDivElement;
@@ -16,7 +23,10 @@
     const rect = trigger.getBoundingClientRect();
     const width = Math.min(260, window.innerWidth - 16);
     left = Math.max(8, Math.min(rect.left, window.innerWidth - width - 8));
-    const height = Math.min(panel.scrollHeight, window.innerHeight - 16);
+    const height = Math.min(
+      followLayout ? panel.getBoundingClientRect().height : panel.scrollHeight,
+      window.innerHeight - 16
+    );
     top =
       rect.bottom + height + 4 <= window.innerHeight - 8
         ? rect.bottom + 4
@@ -60,11 +70,27 @@
     items[next]?.focus();
   }
   onMount(() => {
+    let frame = 0;
     const resize = () => {
-      if (opened) place();
+      if (!followLayout) {
+        if (opened) place();
+        return;
+      }
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        frame = requestAnimationFrame(() => {
+          if (opened) place();
+        });
+      });
     };
+    const observer = followLayout ? new ResizeObserver(resize) : undefined;
+    observer?.observe(trigger);
     window.addEventListener('resize', resize);
-    return () => window.removeEventListener('resize', resize);
+    return () => {
+      observer?.disconnect();
+      cancelAnimationFrame(frame);
+      window.removeEventListener('resize', resize);
+    };
   });
 </script>
 

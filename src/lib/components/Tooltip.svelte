@@ -1,14 +1,15 @@
 <script lang="ts">
-  import { tick, type Snippet } from 'svelte';
+  import { onMount, tick, type Snippet } from 'svelte';
 
   interface Props {
     text: string;
     delay?: number;
     placement?: 'above' | 'below';
+    followLayout?: boolean;
     children: Snippet;
   }
 
-  let { text, delay = 600, placement = 'above', children }: Props = $props();
+  let { text, delay = 600, placement = 'above', followLayout = false, children }: Props = $props();
 
   let visible = $state(false);
   let positioned = $state(false);
@@ -20,6 +21,29 @@
   let wrapper = $state<HTMLSpanElement | undefined>(undefined);
   let tooltipEl = $state<HTMLSpanElement | undefined>(undefined);
   const tooltipId = `tooltip-${Math.random().toString(36).slice(2, 9)}`;
+
+  onMount(() => {
+    if (!followLayout || !wrapper) return;
+    let frame = 0;
+    const reposition = () => {
+      cancelAnimationFrame(frame);
+      // Let the main stage's resize measurement and Svelte update settle first.
+      frame = requestAnimationFrame(() => {
+        frame = requestAnimationFrame(() => {
+          if (visible) updatePosition();
+        });
+      });
+    };
+    const observer = new ResizeObserver(reposition);
+    observer.observe(wrapper);
+    window.addEventListener('resize', reposition);
+    return () => {
+      observer.disconnect();
+      cancelAnimationFrame(frame);
+      clearTimeout(timer);
+      window.removeEventListener('resize', reposition);
+    };
+  });
 
   async function show() {
     // Already showing or timer running — nothing to do.

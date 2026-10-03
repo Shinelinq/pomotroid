@@ -9,6 +9,7 @@
   import { getLocale } from '$paraglide/runtime.js';
   import SmallMenu from './SmallMenu.svelte';
   import * as m from '$paraglide/messages.js';
+  let { onExtraRowsChange }: { onExtraRowsChange?: (rows: number) => void } = $props();
   let menu: SmallMenu;
   let arrangements = $state<SmallMenu>();
   let error = $state('');
@@ -55,6 +56,10 @@
         ? categoryLine
         : m.round_stop_arranged()
   );
+  const extraRows = $derived(Number(count > 0) + Number(!!error && !confirming));
+  $effect(() => {
+    onExtraRowsChange?.(extraRows);
+  });
   function returnCategoryFocus() {
     if (!arrangements?.closeIfOpen() && !menu?.closeIfOpen()) menu?.close();
   }
@@ -129,7 +134,7 @@
 <div class="round-status">
   <div class="status-line">
     <span>{status}</span>
-    <SmallMenu bind:this={menu} label={m.round_more()} icon>
+    <SmallMenu bind:this={menu} label={m.round_more()} icon followLayout>
       <button
         role="menuitemcheckbox"
         aria-checked={$timerState.stop_after_round}
@@ -161,6 +166,7 @@
         </button>
       {:else}<span>{m.round_arranged_count({ count })}</span><span>·</span>{/if}
       <SmallMenu
+        followLayout
         bind:this={arrangements}
         label={count > 1 ? m.round_view() : m.round_more()}
         icon={count === 1}
@@ -204,8 +210,8 @@
 
 <style>
   .round-status {
-    width: min(100%, 310px);
-    font-size: 11px;
+    width: min(100%, 360px);
+    font-size: var(--main-timer-auxiliaryFont, 11px);
     color: var(--color-foreground-darker);
   }
   .status-line,
@@ -213,8 +219,30 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    min-height: 28px;
+    height: var(--main-timer-statusHeight, 28px);
+    line-height: var(--main-timer-statusHeight, 28px);
     gap: 4px;
+  }
+  .status-line > span {
+    white-space: nowrap;
+  }
+  .status-line :global(.trigger),
+  .arranged :global(.trigger),
+  .arranged > button {
+    height: var(--main-timer-statusHeight, 28px);
+    min-height: 0;
+    padding-top: 0;
+    padding-bottom: 0;
+    font-size: inherit;
+    flex-shrink: 0;
+  }
+  .round-status > .error {
+    height: var(--main-timer-statusHeight, 28px);
+    line-height: var(--main-timer-statusHeight, 28px);
+    padding: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .arranged > span:first-child {
     overflow: hidden;

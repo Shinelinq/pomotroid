@@ -15,6 +15,7 @@
   import type { UnlistenFn } from '@tauri-apps/api/event';
   import { info, error as logError } from '@tauri-apps/plugin-log';
   import { createLocalShortcutHandler } from '$lib/utils/localShortcuts';
+  import { fitMainTimer } from '$lib/utils/mainTimerLayout';
 
   // Local shortcut state — volume and fullscreen tracked separately so the
   // handler can read current values without waiting for settings:changed round-trip.
@@ -22,41 +23,59 @@
   let preMuteVolume = $state(0.5);
   let isFullscreen = $state(false);
 
-  // Base window dimensions (natural/default size).
-  const TITLEBAR_H = 40;
+  let stage: HTMLElement;
+  let toolbarContent: HTMLDivElement;
+  let extraStatusRows = $state(0);
+  let available = $state({ width: 328, height: 378, toolbar: 28 });
+  const layout = $derived(
+    fitMainTimer(
+      available.width,
+      available.height,
+      extraStatusRows,
+      available.height + available.toolbar
+    )
+  );
+  const isCompact = $derived(layout.compact);
 
-  // Compact mode: when either dimension drops below this threshold,
-  // hide non-essential elements (footer, label, play/pause) to show
-  // only the timer dial — like an Apple Watch face.
-  const COMPACT_THRESHOLD = 300;
-  const REGULAR_MIN_HEIGHT = 400; // Keep status text and controls at their natural size.
-
-  let uiScale = $state(1.0);
-  let isCompact = $state(false);
-
-  // Extra bottom padding added to <main> in compact mode.  Shifts the
-  // dial upward so the whitespace sits at the bottom rather than being
-  // split equally — compensates for the visual weight of the titlebar.
-  const COMPACT_BOTTOM_PAD = 48;
-
-  $effect(() => {
-    function update() {
-      const w = window.innerWidth;
-      const h = window.innerHeight;
-      isCompact = w < COMPACT_THRESHOLD || h < REGULAR_MIN_HEIGHT;
-      if (isCompact) {
-        // Scale so the dial fills the available space, reserving
-        // COMPACT_BOTTOM_PAD px for the intentional bottom whitespace.
-        const available = Math.min(w - 16, h - TITLEBAR_H - 16 - COMPACT_BOTTOM_PAD);
-        uiScale = Math.max(0.4, Math.min(available / 220, 4));
-      } else {
-        // Reserve space for fixed-size text and controls; only the dial adapts.
-        uiScale = Math.max(0.35, Math.min((w - 32) / 220, (h - TITLEBAR_H - 28 - 190) / 220, 4));
+  onMount(() => {
+    let frame = 0;
+    function measure() {
+      frame = 0;
+      if (!stage.clientWidth || !stage.clientHeight) return;
+      const css = getComputedStyle(stage);
+      const toolbar = toolbarContent.offsetHeight;
+      const width = stage.clientWidth - parseFloat(css.paddingLeft) - parseFloat(css.paddingRight);
+      // Normalize to the regular stage even while the toolbar is hidden, so
+      // compact entry/exit cannot oscillate as the stage gains/loses that row.
+      const height =
+        stage.clientHeight -
+        parseFloat(css.paddingTop) -
+        parseFloat(css.paddingBottom) -
+        (isCompact ? toolbar : 0);
+      if (width <= 0 || height <= 0) return;
+      if (
+        width !== available.width ||
+        height !== available.height ||
+        toolbar !== available.toolbar
+      ) {
+        available = { width, height, toolbar };
       }
     }
-    update();
-    window.addEventListener('resize', update);
-    return () => window.removeEventListener('resize', update);
+    const schedule = () => {
+      if (!frame) frame = requestAnimationFrame(measure);
+    };
+    const observer = new ResizeObserver(schedule);
+    observer.observe(stage);
+    observer.observe(toolbarContent);
+    window.addEventListener('focus', schedule);
+    document.addEventListener('visibilitychange', schedule);
+    measure();
+    return () => {
+      observer.disconnect();
+      cancelAnimationFrame(frame);
+      window.removeEventListener('focus', schedule);
+      document.removeEventListener('visibilitychange', schedule);
+    };
   });
 
   async function startResize(direction: string) {
@@ -196,9 +215,11 @@
 />
 <div class="app">
   <Titlebar />
-  {#if !isCompact}<PlanPicker />{/if}
-  <main class:compact={isCompact}>
-    <Timer {isCompact} {uiScale} />
+  <div class="toolbar" class:collapsed={isCompact} inert={isCompact}>
+    <div bind:this={toolbarContent}><PlanPicker /></div>
+  </div>
+  <main class="timer-stage" bind:this={stage}>
+    <Timer {layout} bind:extraStatusRows />
   </main>
 </div>
 
@@ -208,21 +229,26 @@
     height: 100%;
     display: flex;
     flex-direction: column;
-    overflow: hidden;
     animation: app-fade-in 0.4s var(--transition-slow) both;
   }
 
-  main {
+  .toolbar {
+    flex: none;
+  }
+
+  .toolbar.collapsed {
+    height: 0;
+    visibility: hidden;
+  }
+
+  .timer-stage {
     flex: 1;
+    min-height: 0;
+    min-width: 0;
+    padding: 16px;
     display: flex;
     align-items: center;
     justify-content: center;
-    overflow: hidden;
-  }
-
-  main.compact {
-    /* Bottom padding provides breathing room below the mini controls. */
-    padding-bottom: 8px;
   }
 
   /* ---------------------------------------------------------------------------

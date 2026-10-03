@@ -8,9 +8,10 @@
 
   interface Props {
     snap: TimerState;
+    mainWindow?: boolean;
   }
 
-  let { snap }: Props = $props();
+  let { snap, mainWindow = false }: Props = $props();
 
   let showVolume = $state(false);
 
@@ -46,13 +47,14 @@
 
 <!-- Round counter: X/Y when long breaks are active; labelled session count otherwise -->
 <Tooltip
+  followLayout={mainWindow}
   text={$settings.long_breaks_enabled
     ? m.tooltip_round_counter()
     : m.tooltip_round_counter_session()}
 >
-  <span class="rounds">
+  <span class="rounds" class:main-window={mainWindow}>
     {#if $settings.long_breaks_enabled}
-      {snap.work_round_number} &nbsp;|&nbsp; {snap.work_rounds_total}
+      {snap.work_round_number} | {snap.work_rounds_total}
     {:else}
       {m.timer_session_round({ n: snap.session_work_count })}
     {/if}
@@ -60,8 +62,13 @@
 </Tooltip>
 
 <!-- Reset -->
-<Tooltip text={m.tooltip_reset()}>
-  <button class="btn-text" onclick={timerReset} aria-label={m.timer_reset()}>
+<Tooltip text={m.tooltip_reset()} followLayout={mainWindow}>
+  <button
+    class="btn-text"
+    class:main-window={mainWindow}
+    onclick={timerReset}
+    aria-label={m.timer_reset()}
+  >
     {m.timer_reset()}
   </button>
 </Tooltip>
@@ -69,9 +76,13 @@
 <!-- Volume -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="volume-wrapper">
-  <Tooltip text={localVolume === 0 ? m.tooltip_unmute() : m.tooltip_mute()}>
+  <Tooltip
+    text={localVolume === 0 ? m.tooltip_unmute() : m.tooltip_mute()}
+    followLayout={mainWindow}
+  >
     <button
       class="btn-icon"
+      class:main-window={mainWindow}
       onclick={toggleMute}
       aria-label={localVolume === 0 ? 'Unmute' : 'Mute'}
       onmouseenter={() => (showVolume = true)}
@@ -137,6 +148,38 @@
     min-width: 48px;
     text-align: center;
     cursor: default;
+  }
+
+  .rounds.main-window {
+    display: block;
+    width: max-content;
+    max-width: calc(var(--main-timer-controls) / 3 + 12px);
+    min-width: 0;
+    font-size: var(--main-timer-auxiliaryFont);
+    line-height: calc(var(--main-timer-footerHeight) / 2);
+    overflow-wrap: anywhere;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .btn-text.main-window {
+    font-size: var(--main-timer-auxiliaryFont);
+    line-height: var(--main-timer-footerHeight);
+    padding: 0 4px;
+  }
+
+  .btn-icon.main-window {
+    width: var(--main-timer-footerHeight);
+    height: var(--main-timer-footerHeight);
+  }
+
+  .btn-icon.main-window svg {
+    width: var(--main-timer-sideIcon);
+    height: var(--main-timer-sideIcon);
+  }
+
+  .main-window:focus-visible {
+    outline: 2px solid var(--color-foreground);
+    outline-offset: 2px;
   }
 
   .btn-text {

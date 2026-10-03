@@ -9,9 +9,10 @@
   interface Props {
     snap: TimerState;
     countdown?: boolean;
+    mainWindow?: boolean;
   }
 
-  let { snap, countdown = false }: Props = $props();
+  let { snap, countdown = false, mainWindow = false }: Props = $props();
 
   // SVG constants (matching original Pomotroid geometry)
   const CIRCUMFERENCE = 691.15; // 2π × 110 ≈ 691.15
@@ -49,7 +50,15 @@
   });
 </script>
 
-<svg class="dial" viewBox="0 0 230 230" aria-hidden="true">
+<!-- The existing path has a 220-unit diameter. A 9.209-unit stroke in a
+     229.209-unit viewBox produces a 224px outer diameter and 9px stroke at s=1.
+     Only the viewport scales; the path, dash length and stroke stay in SVG units. -->
+<svg
+  class="dial"
+  class:main-window={mainWindow}
+  viewBox={mainWindow ? '0.395349 0.395349 229.209302 229.209302' : '0 0 230 230'}
+  aria-hidden="true"
+>
   <!-- Background track -->
   <path
     class="track"
@@ -64,7 +73,7 @@
     d="M115,5c60.8,0,110,49.2,110,110s-49.2,110-110,110S5,175.8,5,115S54.2,5,115,5"
     fill="none"
     stroke={strokeColor(snap.round_type)}
-    stroke-width="10"
+    stroke-width={mainWindow ? 9.209302 : 10}
     stroke-linecap="round"
     stroke-dasharray={CIRCUMFERENCE}
     stroke-dashoffset={$dashOffset}
@@ -76,5 +85,10 @@
     width: var(--dial-size, 220px);
     height: var(--dial-size, 220px);
     display: block;
+  }
+  .dial.main-window {
+    width: var(--main-timer-dial);
+    height: var(--main-timer-dial);
+    flex: none;
   }
 </style>
