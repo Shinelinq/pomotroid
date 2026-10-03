@@ -5,6 +5,43 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { open as dialogOpen } from '@tauri-apps/plugin-dialog';
 import type {
+  ImportOptions,
+  ImportPreview,
+  Conflict,
+  Rename,
+  CommitResult,
+  Saved,
+  ReportScope,
+  ReportInfo,
+  Distribution,
+} from '$lib/data/types';
+
+export const dataBegin = () => invoke<string>('data_begin');
+export const dataCancel = (token: string) => invoke<void>('data_cancel', { token });
+export const dataRead = (token: string, locale: string) =>
+  invoke<ImportPreview | null>('data_read', { token, locale });
+export const dataReplan = (token: string, options: ImportOptions) =>
+  invoke<ImportPreview>('data_replan', { token, options });
+export const dataDetails = (token: string, offset: number, renames: boolean) =>
+  invoke<{ conflicts: Conflict[]; renames: Rename[] }>('data_details', { token, offset, renames });
+export const dataCommit = (token: string) => invoke<CommitResult>('data_commit', { token });
+export const dataExport = (profiles: boolean, preferences: boolean) =>
+  invoke<Saved | null>('data_export', { profiles, preferences });
+export const dataLastExport = () => invoke<string | null>('data_last_export');
+export const reportPreview = (token: string, scope: ReportScope, locale: string) =>
+  invoke<ReportInfo>('report_preview', { token, scope, locale });
+export const reportSave = (token: string) => invoke<Saved | null>('report_save', { token });
+export const statsDistribution = (start: string, end: string) =>
+  invoke<Distribution>('stats_distribution', { start, end });
+export const onDataChanged = (cb: () => void): Promise<UnlistenFn> =>
+  listen<void>('data:changed', cb);
+export const dataViewStats = () => invoke<void>('data_view_stats');
+export const onStatsAll = (cb: () => void): Promise<UnlistenFn> => listen<void>('stats:all', cb);
+export const onDataPhase = (
+  cb: (value: { token: string; phase: string }) => void
+): Promise<UnlistenFn> =>
+  listen<{ token: string; phase: string }>('data:phase', (e) => cb(e.payload));
+import type {
   TimerState,
   SessionQuery,
   SessionPage,

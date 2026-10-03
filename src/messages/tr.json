@@ -210,5 +210,18 @@
   "stats_hour_focus": "Bu Pomodoroların odaklanma süresi: {duration}",
   "stats_hour_chart_help": "Bugünün saatleri. Sol/sağ: saati değiştir. Enter veya boşluk: ayrıntıları sabitle. Escape: seçimi temizle.",
   "stats_hour_detail_hint": "Saati görmek için üzerine gelin; ayrıntıları sabitlemek için tıklayın",
-  "stats_clear_hour": "Sabitlenen saati kaldır"
+  "stats_clear_hour": "Sabitlenen saati kaldır",
+  "csv_date": "Tarih",
+  "csv_category": "Kategori",
+  "csv_category_id": "Kalıcı kategori kimliği",
+  "csv_recorded": "Kaydedilen çalışma oturumları",
+  "csv_completed": "Tamamlanan çalışma oturumları",
+  "csv_focus_secs": "Tamamlanan odaklanma saniyeleri",
+  "csv_focus_mins": "Tamamlanan odaklanma dakikaları",
+  "csv_rate": "Tamamlanma oranı (%)",
+  "csv_session_id": "Kalıcı oturum kimliği",
+  "csv_start": "Başlangıç (UTC farkıyla)",
+  "csv_end": "Bitiş (UTC farkıyla)",
+  "csv_status": "Durum",
+  "csv_planned": "Planlanan süre (saniye)"
 }

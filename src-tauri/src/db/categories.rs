@@ -136,13 +136,13 @@ pub fn load(conn: &Connection) -> Result<CategoryData, String> {
 
 // Match the existing plan-name rules: trim, collapse whitespace for comparison,
 // Unicode lowercase, 1–24 scalar characters. Archived names remain reserved.
-fn normalized(name: &str) -> String {
+pub(crate) fn normalized(name: &str) -> String {
     name.split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
         .to_lowercase()
 }
-fn checked_name(
+pub(crate) fn checked_name(
     conn: &Connection,
     name: &str,
     except: Option<i64>,
@@ -200,8 +200,8 @@ pub fn mutate(conn: &Connection, action: &CategoryAction) -> Result<CategoryData
         CategoryAction::Create { name } => {
             let (name, key) = checked_name(&tx, name, None)?;
             tx.execute(
-                "INSERT INTO categories(name,name_key) VALUES (?1,?2)",
-                params![name, key],
+                "INSERT INTO categories(name,name_key,stable_id) VALUES (?1,?2,?3)",
+                params![name, key, uuid::Uuid::new_v4().to_string()],
             )
             .map_err(|e| e.to_string())?;
         }

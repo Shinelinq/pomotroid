@@ -12,6 +12,9 @@
     statsGetDetailed,
     statsGetHeatmap,
     auxiliaryWindowReady,
+    onDataChanged,
+    onCategoriesChanged,
+    onStatsAll,
   } from '$lib/ipc';
   import { settings } from '$lib/stores/settings';
   import { applyTheme } from '$lib/stores/theme';
@@ -33,6 +36,10 @@
   import WeeklyView from '$lib/components/stats/WeeklyView.svelte';
   import YearlyView from '$lib/components/stats/YearlyView.svelte';
   import { dateKey, type Metric } from '$lib/components/stats/stats';
+  import CategoryDistribution from '$lib/components/stats/CategoryDistribution.svelte';
+  import ReportDialog from '$lib/components/data/ReportDialog.svelte';
+  import { overviewScope } from '$lib/data/format';
+  import type { ReportScope, Distribution, DistributionRow } from '$lib/data/types';
 
   type Tab = 'today' | 'week' | 'alltime';
   const tabs: Tab[] = ['today', 'week', 'alltime'];
@@ -40,6 +47,62 @@
   let weeklyMetric = $state<Metric>('time');
   let yearlyMetric = $state<Metric>('time');
   let selectedYear = $state(new Date().getFullYear());
+  let report = $state<ReportScope | null>(null);
+  let reportEntry: HTMLElement | null = null;
+  let dataRevision = $state(0);
+  const distributionCache = new Map<string, Distribution>();
+  let weekExpanded = $state(false),
+    yearExpanded = $state(false);
+  let weekAll = $state(false),
+    yearAll = $state(false);
+  let distributionOrigin = $state<{ tab: Tab; name: string; scroll: number } | null>(null);
+  function openReport(scope: ReportScope) {
+    reportEntry = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    report = scope;
+  }
+  async function closeReport() {
+    report = null;
+    await tick();
+    if (reportEntry?.isConnected) reportEntry.focus({ preventScroll: true });
+  }
+  async function selectDistribution(row: DistributionRow) {
+    distributionOrigin = {
+      tab: activeTab,
+      name: row.name ?? m.category_uncategorized(),
+      scroll: content?.scrollTop ?? 0,
+    };
+    changeFilter(
+      row.category_id === null
+        ? { kind: 'uncategorized' }
+        : { kind: 'category', category_id: row.category_id },
+      true
+    );
+    await tick();
+    document
+      .querySelector<HTMLElement>('[data-distribution-return]')
+      ?.focus({ preventScroll: true });
+  }
+  async function backDistribution() {
+    const scroll = distributionOrigin?.scroll ?? 0;
+    changeFilter({ kind: 'all' }, true);
+    distributionOrigin = null;
+    await tick();
+    document
+      .querySelector<HTMLElement>('[data-distribution-toggle]')
+      ?.focus({ preventScroll: true });
+    if (content) content.scrollTop = scroll;
+  }
+  let dataRefresh: ReturnType<typeof setTimeout> | undefined;
+  function invalidateData() {
+    clearTimeout(dataRefresh);
+    dataRefresh = setTimeout(() => {
+      if (!disposed) {
+        ++dataRevision;
+        distributionCache.clear();
+        refresh(true);
+      }
+    }, 30);
+  }
   let today = $state(dateKey(new Date()));
   let detailedDate = $state(dateKey(new Date()));
   let detailed = $state<DetailedStats | null>(null);
@@ -215,7 +278,8 @@
     if (activeTab === 'alltime' || ((force || dayChanged) && heatmap !== null))
       void loadHeatmap(force || dayChanged);
   }
-  function changeFilter(next: Filter) {
+  function changeFilter(next: Filter, fromDistribution = false) {
+    if (!fromDistribution) distributionOrigin = null;
     if (detail || filterKey(next) === filterKey(filter)) return;
     initialSelection = null;
     restoration = null;
@@ -319,7 +383,16 @@
         void reportError('event subscription failed', error);
       }
     }
-    void keep(onRoundChange(() => refresh(true)));
+    void keep(onRoundChange(invalidateData));
+    void keep(onDataChanged(invalidateData));
+    void keep(onCategoriesChanged(invalidateData));
+    void keep(
+      onStatsAll(() => {
+        if (detail) leaveDetail(activeTab);
+        changeFilter({ kind: 'all' });
+        refresh(true);
+      })
+    );
     void keep(onSessionsCleared(() => refresh(true)));
     void keep(
       onSettingsChanged((updated) => {
@@ -360,6 +433,7 @@
       disposed = true;
       requests.invalidate();
       clearTimeout(midnightTimer);
+      clearTimeout(dataRefresh);
       for (const unlisten of cleanups) unlisten();
       mq.removeEventListener('change', syncTheme);
       window.removeEventListener('focus', onFocus);
@@ -400,7 +474,15 @@
       {/each}
     </div>
     {#if !detail}<div class="category-filter">
-        <CategoryFilter value={filter} onchange={changeFilter} />
+        <CategoryFilter value={filter} onchange={(next) => changeFilter(next)} />
+        <button
+          class="export-button"
+          title={m.report_title()}
+          aria-label={m.report_title()}
+          onclick={() =>
+            openReport({ ...overviewScope(activeTab, today, selectedYear), filter: { ...filter } })}
+          >⇩</button
+        >
       </div>{/if}
   </div>
 
@@ -420,6 +502,7 @@
         filter={detail.filter}
         {today}
         onback={backToStats}
+        onexport={openReport}
       />
     {:else}
       {#if hasError}<div class="load-error" role="status">
@@ -453,6 +536,7 @@
             today={detailed ? detailedDate : today}
             loading={detailedLoading}
             bind:metric={weeklyMetric}
+            distribution={distributionSlot}
           />
         {:else}
           <YearlyView
@@ -465,6 +549,7 @@
             bind:metric={yearlyMetric}
             bind:selectedYear
             scopeLabel={filter.kind === 'all' ? null : scopeName}
+            distribution={distributionSlot}
           />
         {/if}
       {/key}
@@ -472,7 +557,56 @@
   </div>
 </div>
 
+{#snippet distributionSlot()}
+  {@const range = overviewScope(activeTab, today, selectedYear)}
+  {#if activeTab === 'week'}
+    <CategoryDistribution
+      start={range.start!}
+      end={range.end!}
+      label={m.distribution_recent()}
+      visible={filter.kind === 'all'}
+      returnName={distributionOrigin?.tab === activeTab ? distributionOrigin.name : null}
+      bind:expanded={weekExpanded}
+      bind:all={weekAll}
+      revision={dataRevision}
+      cache={distributionCache}
+      onselect={selectDistribution}
+      onback={backDistribution}
+    />
+  {:else if activeTab === 'alltime'}
+    <CategoryDistribution
+      start={range.start!}
+      end={range.end!}
+      label={m.distribution_year({ year: selectedYear })}
+      visible={filter.kind === 'all'}
+      returnName={distributionOrigin?.tab === activeTab ? distributionOrigin.name : null}
+      bind:expanded={yearExpanded}
+      bind:all={yearAll}
+      revision={dataRevision}
+      cache={distributionCache}
+      onselect={selectDistribution}
+      onback={backDistribution}
+    />
+  {/if}
+{/snippet}
+{#if report}<ReportDialog source={report} onclose={closeReport} />{/if}
+
 <style>
+  .export-button {
+    width: 28px;
+    height: 28px;
+    flex: none;
+    margin-left: 8px;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--color-foreground);
+    font-size: 18px;
+    cursor: pointer;
+  }
+  .export-button:hover {
+    background: var(--color-hover);
+  }
   .window {
     display: flex;
     flex-direction: column;

@@ -2,6 +2,7 @@ pub mod audio;
 pub mod commands;
 pub mod auxiliary_windows;
 pub mod db;
+pub mod data;
 pub mod notifications;
 pub mod mini;
 pub mod settings;
@@ -56,6 +57,13 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .on_window_event(|window, event| {
+            if matches!(event, tauri::WindowEvent::Destroyed) {
+                if let Some(data) = window.app_handle().try_state::<data::commands::DataState>() {
+                    data.release_owner(window.label().to_string());
+                }
+            }
+        })
         .setup(|app| {
             // Capture Rust panics to the log file before the process terminates.
             std::panic::set_hook(Box::new(|info| {
@@ -96,6 +104,7 @@ pub fn run() {
                 settings::seed_defaults(&conn).expect("failed to seed default settings");
             }
             app.manage(db.clone());
+            app.manage(data::commands::DataState::new());
             app.manage(auxiliary_windows::AuxiliaryWindows::default());
             app.manage(mini::MiniState::default());
 
@@ -378,6 +387,11 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            data::commands::data_begin, data::commands::data_cancel,
+            data::commands::data_read, data::commands::data_replan, data::commands::data_details,
+            data::commands::data_commit, data::commands::data_export, data::commands::data_last_export,
+            data::commands::report_preview, data::commands::report_save, data::commands::stats_distribution,
+            data::commands::data_view_stats,
             // Timer
             timer_toggle,
             timer_reset,

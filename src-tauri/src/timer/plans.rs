@@ -108,6 +108,7 @@ impl TimerConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Plan {
     pub id: String,
+    pub stable_id: String,
     pub name: String,
     /// The first plan's default display name comes from the message catalog.
     #[serde(default)]
@@ -141,6 +142,7 @@ impl PlanBook {
         let book = Self {
             plans: vec![Plan {
                 id: "plan-1".into(),
+                stable_id: uuid::Uuid::new_v4().to_string(),
                 name: serde_json::from_str::<serde_json::Value>(include_str!(
                     "../../../src/messages/en.json"
                 ))
@@ -206,6 +208,7 @@ impl PlanBook {
         self.next_id += 1;
         self.plans.push(Plan {
             id: id.clone(),
+            stable_id: uuid::Uuid::new_v4().to_string(),
             name,
             initial_name: false,
             config,

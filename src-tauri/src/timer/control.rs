@@ -64,6 +64,44 @@ pub struct Control {
 }
 
 impl Control {
+    pub fn merge_import(
+        &mut self,
+        conn: &Connection,
+        package: &crate::data::package::Package,
+        options: &crate::data::package::Options,
+        confirmed: &crate::data::package::ImportPlan,
+        locale: &str,
+    ) -> Result<(crate::data::package::ImportPlan, bool), String> {
+        use crate::data::{err, package as exchange};
+        if self.started {
+            return Err("data_active_round".into());
+        }
+        let tx = conn.unchecked_transaction().map_err(err)?;
+        let plan = exchange::plan(&tx, package, options, locale)?;
+        if &plan != confirmed {
+            return Ok((plan, false));
+        }
+        if let Err(error) = exchange::apply(&tx, package, &plan) {
+            tx.rollback()
+                .map_err(|e| format!("data_rollback_failed: {e}"))?;
+            log::error!("[data] import transaction rolled back: {error}");
+            return Err("data_rolled_back".into());
+        }
+        let book = exchange::read_book(&tx)?;
+        let categories = categories::load(&tx)?;
+        let preferences = crate::settings::load(&tx).map_err(err)?;
+        tx.commit().map_err(err)?;
+        if let Some(book) = book {
+            self.book = book;
+        }
+        self.categories = categories;
+        self.category_revision += 1;
+        if options.preferences {
+            self.settings = preferences;
+        }
+        self.touch();
+        Ok((plan, true))
+    }
     pub fn new(mut settings: Settings, book: PlanBook) -> Self {
         book.working.apply(&mut settings);
         Self {

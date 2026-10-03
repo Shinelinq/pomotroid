@@ -53,7 +53,12 @@ export function createChartInteraction(initialPinned: string | null = null) {
       pinned = null;
     },
     escape(event: KeyboardEvent) {
-      if (event.key !== 'Escape') return;
+      if (
+        event.key !== 'Escape' ||
+        event.defaultPrevented ||
+        document.querySelector('dialog[open], [popover]:popover-open')
+      )
+        return;
       event.preventDefault();
       event.stopPropagation();
       clear();

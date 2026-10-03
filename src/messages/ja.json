@@ -210,5 +210,18 @@
   "stats_hour_focus": "これらのポモドーロの集中時間：{duration}",
   "stats_hour_chart_help": "今日の時間帯別グラフ。左右キーで移動、Enterまたはスペースで詳細を固定、Escで解除。",
   "stats_hour_detail_hint": "ホバーで時間帯を確認、クリックで詳細を固定",
-  "stats_clear_hour": "時間帯の固定を解除"
+  "stats_clear_hour": "時間帯の固定を解除",
+  "csv_date": "日付",
+  "csv_category": "カテゴリ",
+  "csv_category_id": "カテゴリの安定ID",
+  "csv_recorded": "記録された作業セッション数",
+  "csv_completed": "完了した作業セッション数",
+  "csv_focus_secs": "完了した集中時間（秒）",
+  "csv_focus_mins": "完了した集中時間（分）",
+  "csv_rate": "完了率（%）",
+  "csv_session_id": "セッションの安定ID",
+  "csv_start": "開始時刻（UTCオフセット付き）",
+  "csv_end": "終了時刻（UTCオフセット付き）",
+  "csv_status": "状態",
+  "csv_planned": "予定時間（秒）"
 }

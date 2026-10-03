@@ -81,6 +81,38 @@ pub struct TimerController {
 }
 
 impl TimerController {
+    /// The same control -> database lock order as timer events. Parsing and preview never
+    /// enter this section; starts from every window/tray wait only for the final transaction.
+    pub fn import_data(
+        &self,
+        app: &AppHandle,
+        db: &DbState,
+        package: &crate::data::package::Package,
+        options: &crate::data::package::Options,
+        confirmed: &crate::data::package::ImportPlan,
+        locale: &str,
+    ) -> Result<(crate::data::package::ImportPlan, bool, bool), String> {
+        let mut state = self.control.lock().map_err(crate::data::err)?;
+        let conn = db.lock().map_err(crate::data::err)?;
+        let (plan, committed) = state.merge_import(&conn, package, options, confirmed, locale)?;
+        if !committed {
+            return Ok((plan, false, false));
+        }
+        let preferences = state.settings.clone();
+        let (plans, categories, view) = (state.view(), state.category_view(), state.tray_view());
+        drop(conn);
+        drop(state);
+        let mut refresh_failed = app.emit("data:changed", ()).is_err();
+        refresh_failed |= app.emit("plans:changed", plans).is_err();
+        refresh_failed |= app.emit("categories:changed", categories).is_err();
+        if options.preferences {
+            refresh_failed |= app.emit("settings:changed", preferences).is_err();
+        }
+        if let Some(tray) = app.try_state::<Arc<TrayState>>() {
+            tray::present(app, &tray, view);
+        }
+        Ok((plan, true, refresh_failed))
+    }
     pub fn new(app: AppHandle, settings: Settings, tray: Arc<TrayState>, db: DbState) -> Self {
         let book =
             PlanBook::load(&db.lock().unwrap(), &settings).expect("failed to load timer plans");

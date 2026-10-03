@@ -26,6 +26,8 @@ dist/
 !.env.example
 
 # User databases and their SQLite sidecars
+*.pomotroid.json
+Pomotroid-*.csv
 *.db
 *.db-wal
 *.db-shm

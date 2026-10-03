@@ -151,6 +151,56 @@ pub fn run(conn: &Connection) -> Result<()> {
         tx.commit()?;
     }
 
+    if version < 8 {
+        let tx = conn.unchecked_transaction()?;
+        tx.execute_batch(
+            "ALTER TABLE sessions ADD COLUMN stable_id TEXT;
+            ALTER TABLE categories ADD COLUMN stable_id TEXT;
+            CREATE UNIQUE INDEX idx_sessions_stable_id ON sessions(stable_id);
+            CREATE UNIQUE INDEX idx_categories_stable_id ON categories(stable_id);
+            CREATE TABLE import_mappings (
+                kind TEXT NOT NULL, stable_id TEXT NOT NULL,
+                source_hash TEXT NOT NULL, applied_hash TEXT NOT NULL,
+                PRIMARY KEY(kind,stable_id));",
+        )?;
+        for table in ["sessions", "categories"] {
+            let ids = tx
+                .prepare(&format!("SELECT id FROM {table}"))?
+                .query_map([], |r| r.get::<_, i64>(0))?
+                .collect::<Result<Vec<_>>>()?;
+            for id in ids {
+                tx.execute(
+                    &format!("UPDATE {table} SET stable_id=?1 WHERE id=?2"),
+                    rusqlite::params![uuid::Uuid::new_v4().to_string(), id],
+                )?;
+            }
+        }
+        if let Some(json) = crate::settings::get_setting(&tx, crate::timer::plans::STORAGE_KEY) {
+            let mut book: serde_json::Value = serde_json::from_str(&json)
+                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+            if let Some(plans) = book["plans"].as_array_mut() {
+                for plan in plans {
+                    if !plan["stable_id"]
+                        .as_str()
+                        .is_some_and(|s| uuid::Uuid::parse_str(s).is_ok_and(|id| !id.is_nil()))
+                    {
+                        plan["stable_id"] = uuid::Uuid::new_v4().to_string().into();
+                    }
+                }
+            } else {
+                return Err(rusqlite::Error::InvalidParameterName(
+                    "invalid saved plan collection".into(),
+                ));
+            }
+            crate::settings::save_setting(
+                &tx,
+                crate::timer::plans::STORAGE_KEY,
+                &book.to_string(),
+            )?;
+        }
+        tx.execute_batch("INSERT INTO schema_version VALUES (8)")?;
+        tx.commit()?;
+    }
     Ok(())
 }
 
@@ -186,7 +236,65 @@ mod tests {
         let v: i64 = conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 7);
+        assert_eq!(v, 8);
+    }
+
+    #[test]
+    fn identity_migration_only_adds_metadata_and_preserves_saved_plan_ids_and_drafts() {
+        let conn = version_six();
+        conn.execute_batch(MIGRATION_7).unwrap();
+        conn.execute(
+            "INSERT INTO categories(id,name,name_key,archived) VALUES (17,'Reading','reading',1)",
+            [],
+        )
+        .unwrap();
+        conn.execute("UPDATE sessions SET category_id=17 WHERE id=42", [])
+            .unwrap();
+        let original = serde_json::json!({"plans":[{"id":"plan-7","name":"Saved","initial_name":false,"config":{"time_work_secs":1500}}],"selected_id":"plan-7","working":{"time_work_secs":2345},"next_id":8});
+        crate::settings::save_setting(
+            &conn,
+            crate::timer::plans::STORAGE_KEY,
+            &original.to_string(),
+        )
+        .unwrap();
+        run(&conn).unwrap();
+        let ids = || {
+            conn.prepare("SELECT stable_id FROM sessions ORDER BY id")
+                .unwrap()
+                .query_map([], |r| r.get::<_, String>(0))
+                .unwrap()
+                .collect::<Result<Vec<_>>>()
+                .unwrap()
+        };
+        let first = ids();
+        run(&conn).unwrap();
+        assert_eq!(ids(), first);
+        assert!(first.iter().all(|id| uuid::Uuid::parse_str(id).is_ok()));
+        let row: (i64, String, bool, String) = conn
+            .query_row(
+                "SELECT id,name,archived,stable_id FROM categories",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!((row.0, row.1, row.2), (17, "Reading".into(), true));
+        assert!(uuid::Uuid::parse_str(&row.3).is_ok());
+        let mut migrated: serde_json::Value = serde_json::from_str(
+            &crate::settings::get_setting(&conn, crate::timer::plans::STORAGE_KEY).unwrap(),
+        )
+        .unwrap();
+        assert!(uuid::Uuid::parse_str(migrated["plans"][0]["stable_id"].as_str().unwrap()).is_ok());
+        migrated["plans"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("stable_id");
+        assert_eq!(migrated, original);
+        assert_eq!(
+            conn.query_row::<i64, _, _>("SELECT category_id FROM sessions WHERE id=42", [], |r| r
+                .get(0))
+                .unwrap(),
+            17
+        );
     }
 
     #[test]
@@ -283,6 +391,6 @@ mod tests {
         conn.execute_batch("DROP INDEX idx_sessions_category_started")
             .unwrap();
         run(&conn).unwrap();
-        assert_eq!(current_version(&conn).unwrap(), 7);
+        assert_eq!(current_version(&conn).unwrap(), 8);
     }
 }

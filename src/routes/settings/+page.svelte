@@ -29,6 +29,7 @@
   import ShortcutsSection from '$lib/components/settings/sections/ShortcutsSection.svelte';
   import SystemSection from '$lib/components/settings/sections/SystemSection.svelte';
   import AboutSection from '$lib/components/settings/sections/AboutSection.svelte';
+  import DataSection from '$lib/components/data/DataSection.svelte';
 
   import * as m from '$paraglide/messages.js';
 
@@ -39,6 +40,7 @@
     | 'notifications'
     | 'shortcuts'
     | 'system'
+    | 'data'
     | 'about';
 
   const SECTIONS: { id: Section; label: () => string }[] = [
@@ -48,11 +50,14 @@
     { id: 'notifications', label: m.nav_notifications },
     { id: 'shortcuts', label: m.nav_shortcuts },
     { id: 'system', label: m.nav_system },
+    { id: 'data', label: m.data_title },
     { id: 'about', label: m.nav_about },
   ];
 
   let active = $state<Section>('timer');
+  let dataBusy = $state(false);
   async function focusPlans() {
+    if (dataBusy) return;
     if (!(await takeTimerPlansFocus())) return;
     active = 'timer';
     await tick();
@@ -62,6 +67,7 @@
   }
 
   async function focusCategories() {
+    if (dataBusy) return;
     if (!(await takeCategoriesFocus())) return;
     active = 'categories';
     await tick();
@@ -190,6 +196,7 @@
         {#each SECTIONS as section}
           <button
             class="nav-item"
+            disabled={dataBusy}
             class:active={active === section.id}
             onclick={() => {
               active = section.id;
@@ -218,6 +225,8 @@
           <SystemSection />
         {:else if active === 'about'}
           <AboutSection />
+        {:else if active === 'data'}
+          <DataSection bind:busy={dataBusy} />
         {/if}
       </div>
     </main>

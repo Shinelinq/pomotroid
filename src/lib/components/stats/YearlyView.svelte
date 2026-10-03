@@ -1,5 +1,6 @@
 <script lang="ts">
   import { untrack } from 'svelte';
+  import type { Snippet } from 'svelte';
   import type { ChartSelection, DetailEntry } from './sessionDetails';
   import type { HeatmapStats, HeatmapEntry } from '$lib/types';
   import * as m from '$paraglide/messages.js';
@@ -30,6 +31,7 @@
     scopeLabel = null,
     metric = $bindable<Metric>('time'),
     selectedYear = $bindable(new Date().getFullYear()),
+    distribution,
   }: {
     heatmap: HeatmapStats | null;
     today: string;
@@ -39,6 +41,7 @@
     scopeLabel?: string | null;
     metric?: Metric;
     selectedYear?: number;
+    distribution?: Snippet;
   } = $props();
   const interaction = createChartInteraction(untrack(() => initialSelection?.pinned ?? null));
   const legendInteraction = createChartInteraction();
@@ -331,6 +334,7 @@
       />
     </div>
   </div>
+  {@render distribution?.()}
   <div class="lifetime">
     <h2>
       {scopeLabel

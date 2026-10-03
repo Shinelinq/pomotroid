@@ -1,5 +1,6 @@
 <script lang="ts">
   import { untrack } from 'svelte';
+  import type { Snippet } from 'svelte';
   import type { ChartSelection, DetailEntry } from './sessionDetails';
   import type { DayStat, StreakInfo } from '$lib/types';
   import * as m from '$paraglide/messages.js';
@@ -29,6 +30,7 @@
     initialSelection,
     onopen,
     metric = $bindable<Metric>('time'),
+    distribution,
   }: {
     week: DayStat[] | null;
     streak: StreakInfo | null;
@@ -37,6 +39,7 @@
     initialSelection?: ChartSelection | null;
     onopen?: (entry: DetailEntry) => void;
     metric?: Metric;
+    distribution?: Snippet;
   } = $props();
   const interaction = createChartInteraction(untrack(() => initialSelection?.pinned ?? null));
   const tooltipId = 'weekly-date-tooltip';
@@ -272,6 +275,7 @@
       onenter={interaction.keep}
       onleave={interaction.leave}
     />{/if}
+  {@render distribution?.()}
 </div>
 
 <style>

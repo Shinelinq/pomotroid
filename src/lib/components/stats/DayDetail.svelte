@@ -1,7 +1,14 @@
 <script lang="ts">
   import { onMount, tick, untrack } from 'svelte';
   import type { CategoryFilter, SessionRecord, TimerState } from '$lib/types';
-  import { statsGetSessions, getTimerState, onTimerState, onSessionsCleared } from '$lib/ipc';
+  import {
+    statsGetSessions,
+    getTimerState,
+    onTimerState,
+    onSessionsCleared,
+    onDataChanged,
+  } from '$lib/ipc';
+  import type { ReportScope } from '$lib/data/types';
   import { categories, connectCategories } from '$lib/categories/state';
   import { filterName } from '$lib/categories/format';
   import { getLocale } from '$paraglide/runtime.js';
@@ -23,12 +30,14 @@
     filter,
     today,
     onback,
+    onexport,
   }: {
     initialDate: string;
     initialHour?: number | null;
     filter: CategoryFilter;
     today: string;
     onback: () => void;
+    onexport?: (scope: ReportScope) => void;
   } = $props();
   let date = $state(untrack(() => initialDate));
   let hour = $state<number | null>(untrack(() => initialHour));
@@ -115,6 +124,7 @@
       await Promise.all([
         keep(onTimerState(receiveTimer)),
         keep(onSessionsCleared(scheduleRefresh)),
+        keep(onDataChanged(scheduleRefresh)),
       ]);
       const initial = await getTimerState();
       if (disposed) return;
@@ -207,6 +217,14 @@
       <button bind:this={backButton} class="text-button" onclick={onback}>{m.detail_back()}</button>
       <h2 bind:this={dateHeading} tabindex="-1">{dateTitle}</h2>
       <div class="date-actions">
+        {#if onexport}<button
+            class="icon-button"
+            title={m.report_title()}
+            aria-label={m.report_title()}
+            onclick={() =>
+              onexport?.({ kind: 'sessions', start: date, end: date, filter: { ...filter }, hour })}
+            >⇩</button
+          >{/if}
         {#if date !== today}<button class="text-button" onclick={() => navigate(today)}
             >{m.detail_today()}</button
           >{/if}

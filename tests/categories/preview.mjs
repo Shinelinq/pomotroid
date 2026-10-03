@@ -5,6 +5,7 @@ import { mount } from 'svelte';
 import { get } from 'svelte/store';
 import { settings } from '../../src/lib/stores/settings';
 import { dateKey, shiftDate } from '../../src/lib/components/stats/stats';
+import { dataFixture } from '../data/fixture.mjs';
 
 const params = new URLSearchParams(location.search);
 const kind = params.get('window') ?? 'stats';
@@ -282,9 +283,14 @@ if (params.has('host')) {
     };
   }
   const calls = [];
+  const exchange = params.has('data') ? dataFixture({ items, rows, timer, today, params }) : null;
   mockIPC(
     async (command, args) => {
       calls.push({ command, args });
+      if (exchange) {
+        const result = await exchange(command, args);
+        if (result.handled) return result.value;
+      }
       if (command === 'settings_get') return saved;
       if (command === 'themes_list') return [{ ...theme, is_custom: false }];
       if (command === 'timer_get_state') return structuredClone(timer);

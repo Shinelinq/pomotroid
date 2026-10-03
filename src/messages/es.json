@@ -210,5 +210,18 @@
   "stats_hour_focus": "Concentración de estos Pomodoros: {duration}",
   "stats_hour_chart_help": "Hoy por hora. Izquierda/derecha: cambiar hora. Intro o espacio: fijar detalles. Escape: borrar selección.",
   "stats_hour_detail_hint": "Pasa el cursor para ver una hora; haz clic para fijarla",
-  "stats_clear_hour": "Quitar hora fijada"
+  "stats_clear_hour": "Quitar hora fijada",
+  "csv_date": "Fecha",
+  "csv_category": "Categoría",
+  "csv_category_id": "ID estable de categoría",
+  "csv_recorded": "Sesiones de trabajo registradas",
+  "csv_completed": "Sesiones de trabajo completadas",
+  "csv_focus_secs": "Segundos de concentración completados",
+  "csv_focus_mins": "Minutos de concentración completados",
+  "csv_rate": "Tasa de finalización (%)",
+  "csv_session_id": "ID estable de sesión",
+  "csv_start": "Inicio (con desplazamiento UTC)",
+  "csv_end": "Fin (con desplazamiento UTC)",
+  "csv_status": "Estado",
+  "csv_planned": "Duración prevista en segundos"
 }

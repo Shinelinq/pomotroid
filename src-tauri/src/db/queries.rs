@@ -30,9 +30,9 @@ pub fn insert_session_with_category(
     }
     let started_at = unix_now();
     conn.execute(
-        "INSERT INTO sessions (started_at, round_type, duration_secs, completed, category_id)
-         VALUES (?1, ?2, ?3, 0, ?4)",
-        params![started_at, round_type, duration_secs, category_id],
+        "INSERT INTO sessions (started_at, round_type, duration_secs, completed, category_id, stable_id)
+         VALUES (?1, ?2, ?3, 0, ?4, ?5)",
+        params![started_at, round_type, duration_secs, category_id, uuid::Uuid::new_v4().to_string()],
     )?;
     let id = conn.last_insert_rowid();
     log::debug!("[db] session started: id={id} type={round_type} duration={duration_secs}s");

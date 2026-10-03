@@ -13,6 +13,97 @@ fn setup(settings: Settings) -> (Control, DbState) {
     let book = PlanBook::load(&conn, &settings).unwrap();
     (Control::new(settings, book), Arc::new(Mutex::new(conn)))
 }
+
+#[test]
+fn import_preview_is_allowed_during_running_and_paused_rounds_but_commit_is_not() {
+    use crate::data::package::{plan, snapshot, Options};
+    let (mut state, db) = setup(Settings::default());
+    let conn = db.lock().unwrap();
+    let package = snapshot(&conn, true, false).unwrap();
+    let options = Options {
+        history: true,
+        profiles: true,
+        preferences: false,
+    };
+    state.start();
+    let confirmed = plan(&conn, &package, &options, "en").unwrap();
+    assert_eq!(
+        state
+            .merge_import(&conn, &package, &options, &confirmed, "en")
+            .unwrap_err(),
+        "data_active_round"
+    );
+    state.is_running = false;
+    assert_eq!(
+        state
+            .merge_import(&conn, &package, &options, &confirmed, "en")
+            .unwrap_err(),
+        "data_active_round"
+    );
+    state.started = false;
+    // An old unfinished database record is not an active runtime round.
+    crate::db::queries::insert_session(&conn, "work", 60).unwrap();
+    assert!(
+        state
+            .merge_import(&conn, &package, &options, &confirmed, "en")
+            .unwrap()
+            .1
+    );
+}
+
+#[test]
+fn stale_import_plan_never_writes_and_rollback_preserves_runtime() {
+    use crate::data::package::{plan, snapshot, Options};
+    let (mut state, db) = setup(Settings::default());
+    let (_, source) = setup(Settings::default());
+    let source = source.lock().unwrap();
+    crate::db::categories::mutate(
+        &source,
+        &crate::db::categories::CategoryAction::Create {
+            name: "Reading".into(),
+        },
+    )
+    .unwrap();
+    crate::db::queries::insert_session(&source, "work", 60).unwrap();
+    let package = snapshot(&source, true, false).unwrap();
+    let options = Options {
+        history: true,
+        profiles: true,
+        preferences: false,
+    };
+    let conn = db.lock().unwrap();
+    let confirmed = plan(&conn, &package, &options, "en").unwrap();
+    crate::db::categories::mutate(
+        &conn,
+        &crate::db::categories::CategoryAction::Create {
+            name: "Reading".into(),
+        },
+    )
+    .unwrap();
+    let (updated, committed) = state
+        .merge_import(&conn, &package, &options, &confirmed, "en")
+        .unwrap();
+    assert!(!committed);
+    assert_eq!(
+        conn.query_row::<i64, _, _>("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))
+            .unwrap(),
+        0
+    );
+    conn.execute_batch("CREATE TRIGGER fail_import BEFORE INSERT ON sessions BEGIN SELECT RAISE(ABORT,'test'); END").unwrap();
+    let before = serde_json::to_string(&state.view()).unwrap();
+    assert_eq!(
+        state
+            .merge_import(&conn, &package, &options, &updated, "en")
+            .unwrap_err(),
+        "data_rolled_back"
+    );
+    assert_eq!(serde_json::to_string(&state.view()).unwrap(), before);
+    assert_eq!(
+        conn.query_row::<i64, _, _>("SELECT COUNT(*) FROM categories", [], |r| r.get(0))
+            .unwrap(),
+        1
+    );
+}
 fn action(state: &mut Control, db: &DbState, op: PlanAction) -> Result<Vec<TimerCommand>, String> {
     apply_action(state, Action::Plan(op), db)
 }
